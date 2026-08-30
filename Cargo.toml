@@ -1,0 +1,24 @@
+[package]
+name = "polyengine-dioxus"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Dioxus renderer for components running on polyengine: batched DOM mutations over a zero-copy stream surface"
+publish = false
+
+[dependencies]
+wit-bindgen = { version = "=0.60.0", features = ["async-spawn"] }
+dioxus-core = "=0.7.10"
+dioxus-html = { version = "=0.7.10", default-features = false }
+
+[dev-dependencies]
+
+[workspace]
+members = ["."]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

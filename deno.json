@@ -1,0 +1,16 @@
+{
+  "imports": {
+    "@deltic/runtime/embedder": "./.deps/polyengine/runtime/src/embedder/mod.ts",
+    "@deltic/runtime/shim": "./.deps/polyengine/runtime/src/shim/mod.ts",
+    "@deltic/protocol": "./.deps/polyengine/protocol/src/mod.ts",
+    "@deltic/translator": "./.deps/polyengine/translator/mod.ts",
+    "linkedom": "npm:linkedom@0.18.12"
+  },
+  "compilerOptions": {
+    "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
+  },
+  "tasks": {
+    "check": "deno check host/src host/tests",
+    "test": "deno test --allow-read host/tests/"
+  }
+}

@@ -1,0 +1,9 @@
+# Unanchored: catches nested crate target/ dirs (examples/*/target) too.
+target/
+node_modules/
+build/
+dist/
+# Pinned local checkout of polyengine (see justfile `deps`).
+.deps/
+# Deno/npm lockfiles are committed; caches are not.
+.playwright/

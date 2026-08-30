@@ -1,0 +1,281 @@
+/// polymorph:dioxus — a batched DOM-mutation surface for Dioxus apps running
+/// as components on polyengine.
+///
+/// Design: the guest queues DOM mutations into a compact byte format
+/// (sledgehammer-bindgen-shaped) and delivers whole batches across the
+/// boundary; the host decodes with a tight switch loop and applies them to a
+/// live DOM subtree. Strings cross the boundary two ways: `&'static` names
+/// (tags, attribute names, event names) are interned once and referenced by
+/// u16 id thereafter; dynamic text is concatenated per batch and decoded with
+/// a single TextDecoder pass.
+///
+/// The wire format below is normative and versions with this WIT package:
+/// any change to opcodes, operand layouts, or framing bumps the package
+/// version (instantiation is digest-checked, so a mismatch fails loudly and
+/// early).
+package polymorph:dioxus@0.1.0;
+
+/// The mutation channel and the live-event handle.
+///
+/// # Transports
+///
+/// Two transports carry the same op encoding; a guest uses exactly one per
+/// instantiation (selection is a build/config concern; interleaving both in
+/// one session is undefined):
+///
+/// - **stream** (`open`): the guest creates a `stream<u8>` and hands the
+///   host the read end once, before the first batch. The host parks a
+///   direct-read session on it (polyengine amendment A21 `readDirect`): the
+///   decode callback runs synchronously inside the guest's `stream.write`
+///   rendezvous over a view aliasing guest linear memory — zero copies.
+///   Batches are framed (see "Framing") because stream chunking is not
+///   preserved end-to-end.
+/// - **call** (`flush`): one synchronous import call per batch, ops as
+///   `list<u8>` (one bulk copy) and the string segment as `string` (one
+///   TextDecoder pass at the lift). Framing is NOT used: the two arguments
+///   are exactly one batch's segments. This transport is the benchmark
+///   baseline and debugging path; it may be retired after A/B measurement.
+///
+/// # Batch layout
+///
+/// A batch has two segments:
+///
+/// - **string segment**: UTF-8 bytes, the concatenation of every dynamic
+///   string operand (`dynstr` below) in op order. Decoded host-side in one
+///   pass (`TextDecoder("utf-8", { ignoreBOM: true })` — BOM stripping must
+///   be disabled or a leading U+FEFF in the first string would misalign
+///   slicing), then sliced per-operand by UTF-16 code-unit lengths carried
+///   in the op segment.
+/// - **op segment**: opcodes and operands, little-endian, unaligned.
+///
+/// # Framing (stream transport only)
+///
+/// ```text
+/// frame     := frame-len:u32 strings-len:u32 strings:u8{strings-len} ops:u8{rest}
+/// frame-len  = byte length of everything after the frame-len field
+///            = 4 + strings-len + len(ops)
+/// ```
+///
+/// Frames arrive back-to-back; a delivery may contain several frames or a
+/// partial one (stream writers chunk internally). The decoder consumes only
+/// whole frames from a direct-read view and leaves a partial tail unread
+/// (redelivered at the next rendezvous); if it cannot consume at least one
+/// byte it stages the partial tail instead (a direct-read callback must not
+/// acknowledge zero bytes and keep the session parked).
+///
+/// # Primitive operand encodings
+///
+/// ```text
+/// u8/u16/u32/s64/f64 : little-endian, unaligned
+/// id     : u32   — Dioxus ElementId (slab index; dense). id 0 is the mount
+///                  root: the host-designated element the app renders into.
+/// m      : u32   — "top m nodes of the stack" count
+/// tmpl   : u16   — guest-assigned template id
+/// path   : u8 length, then that many u8 child indices
+/// strref : u16   — interned string id, defined by a prior cache-string op
+///                  (in this or any earlier batch). 0xffff = none where the
+///                  operand is optional (namespaces).
+/// dynstr : u16 UTF-16 code-unit length, then (iff 0xffff) u32 actual
+///          length. Content is the next `length` code units of the decoded
+///          string segment, consumed sequentially. The encoder appends the
+///          string's UTF-8 bytes to the string segment and writes its
+///          UTF-16 code-unit count here (Rust: sum of char::len_utf16,
+///          with an all-ASCII fast path where it equals the byte length).
+/// ```
+///
+/// # Opcodes
+///
+/// The vocabulary mirrors dioxus-core 0.7's `WriteMutations` trait plus two
+/// protocol ops (cache-string, register-template). Stack semantics ("push",
+/// "top m nodes") are Dioxus's mutation-stack semantics, identical to its
+/// own web interpreter.
+///
+/// ```text
+/// 0x01 cache-string        id:u16 s:dynstr
+///        Define (or overwrite) interned slot `id`. Slots are guest-managed;
+///        ids are assigned monotonically from 0 in practice.
+/// 0x02 register-template   tmpl:u16 nroots:u16 root:node{nroots}
+///        node := kind:u8 ...
+///          0x00 element  tag:strref ns:strref nattrs:u16
+///                        attr{nattrs} := name:strref ns:strref value:dynstr
+///                        nchildren:u16 node{nchildren}
+///          0x01 text     value:dynstr
+///          0x02 dynamic  (placeholder for a runtime-supplied node)
+///        Registers a static template; the host materializes it once
+///        (detached) and later load-template clones root subtrees from it.
+///        Guest sends each distinct template once, before its first use
+///        (templates are 'static with unique identity, keyed guest-side by
+///        pointer).
+/// 0x03 append-children     id m
+/// 0x04 assign-id           path id
+/// 0x05 create-placeholder  id
+/// 0x06 create-text-node    id text:dynstr
+/// 0x07 load-template       tmpl root-index:u16 id
+/// 0x08 replace-with        id m
+/// 0x09 replace-placeholder path m
+/// 0x0a insert-after        id m
+/// 0x0b insert-before       id m
+/// 0x0c set-attribute       id name:strref ns:strref value:attrval
+///        attrval := kind:u8 ...
+///          0x00 text   s:dynstr
+///          0x01 float  f64
+///          0x02 int    s64
+///          0x03 bool   u8
+///          0x04 none   (remove the attribute)
+///        The host applies Dioxus's attribute semantics (value/checked/
+///        selected as properties, style namespace via style object,
+///        dangerous_inner_html, boolean attribute removal on false).
+/// 0x0d set-text            id text:dynstr
+/// 0x0e new-event-listener  id name:strref
+/// 0x0f remove-event-listener id name:strref
+/// 0x10 remove              id
+/// 0x11 push-root           id
+/// ```
+///
+/// Event names cross back on `handle-event` as the same interned u16, so
+/// steady-state event dispatch transfers no string data at all.
+interface surface {
+  /// Hand the host the read end of the mutation stream (stream transport).
+  /// Called at most once, before the first batch is written. The host keeps
+  /// a direct-read session parked on it for the life of the instance.
+  open: async func(ops: stream<u8>);
+
+  /// Deliver one batch (call transport): `ops` is the op segment, `strings`
+  /// the string segment (already a host string after the lift; the decoder
+  /// slices it directly). Applied synchronously before this call returns.
+  flush: func(ops: list<u8>, strings: string);
+
+  /// A live DOM event, lent to the guest for the duration of one
+  /// `handle-event` call (the cancelable window). Calling either method
+  /// after the originating dispatch has completed is a harmless no-op
+  /// (relevant when the guest was busy and the event was queued).
+  resource dom-event {
+    /// Call the native `preventDefault()`. The renderer invokes this
+    /// synchronously (still inside the host's DOM listener frame) when the
+    /// app's handler called `Event::prevent_default()` — Dioxus semantics
+    /// require that flag to be set before the handler's first await.
+    prevent-default: func();
+
+    /// Call the native `stopPropagation()`. Dioxus bubbling is synthetic
+    /// (guest-side); this affects only non-Dioxus listeners on the page.
+    stop-propagation: func();
+  }
+}
+
+/// Typed event payloads, host-serialized at dispatch. One snapshot per
+/// event; fields not applicable to an event family are simply absent by
+/// construction (the family is chosen host-side by event name, mirroring
+/// dioxus-html's name→data-type mapping). Families not yet covered
+/// (drag/touch/composition/animation/media specifics, onmounted) dispatch
+/// as `empty` in this version.
+interface events {
+  flags modifiers { alt, ctrl, meta, shift }
+
+  record mouse-data {
+    client-x: f64,
+    client-y: f64,
+    page-x: f64,
+    page-y: f64,
+    screen-x: f64,
+    screen-y: f64,
+    offset-x: f64,
+    offset-y: f64,
+    /// Which button changed state (MouseEvent.button; -1 when not applicable).
+    button: s16,
+    /// Currently depressed buttons bitmask (MouseEvent.buttons).
+    buttons: u16,
+    mods: modifiers,
+  }
+
+  record pointer-data {
+    mouse: mouse-data,
+    pointer-id: s32,
+    width: f64,
+    height: f64,
+    pressure: f64,
+    tangential-pressure: f64,
+    tilt-x: f64,
+    tilt-y: f64,
+    twist: f64,
+    /// "mouse" | "pen" | "touch"
+    pointer-type: string,
+    is-primary: bool,
+  }
+
+  record keyboard-data {
+    key: string,
+    code: string,
+    /// KeyboardEvent.location (0 standard, 1 left, 2 right, 3 numpad).
+    location: u8,
+    repeat: bool,
+    is-composing: bool,
+    mods: modifiers,
+  }
+
+  record wheel-data {
+    mouse: mouse-data,
+    delta-x: f64,
+    delta-y: f64,
+    delta-z: f64,
+    /// WheelEvent.deltaMode (0 pixel, 1 line, 2 page).
+    delta-mode: u8,
+  }
+
+  record form-data {
+    /// The control's current value (input/textarea/select) or "" when not
+    /// applicable.
+    value: string,
+    /// Present for checkable controls.
+    checked: option<bool>,
+    /// Form entries, populated for submit-shaped events on a form element
+    /// (name → values, multi-valued controls preserved).
+    values: list<tuple<string, list<string>>>,
+  }
+
+  record scroll-data {
+    scroll-top: f64,
+    scroll-left: f64,
+    scroll-width: f64,
+    scroll-height: f64,
+    client-width: f64,
+    client-height: f64,
+  }
+
+  variant payload {
+    /// Events with no serialized data (focus/blur, load/error, select,
+    /// toggle, click on non-interactive targets never carries less than
+    /// mouse — see family mapping in the host).
+    empty,
+    mouse(mouse-data),
+    pointer(pointer-data),
+    keyboard(keyboard-data),
+    wheel(wheel-data),
+    form(form-data),
+    scroll(scroll-data),
+  }
+}
+
+/// A Dioxus application component. The host instantiates it, calls `run`
+/// once (a long-lived task: it opens the mutation channel, mounts the app,
+/// then loops on Dioxus's scheduler — driving `use_future`s and flushing
+/// re-renders until the instance is torn down; its promise never settles in
+/// normal operation), and dispatches DOM events via `handle-event`.
+world app {
+  use events.{payload};
+  use surface.{dom-event};
+
+  import surface;
+
+  /// Start the app: open the mutation channel, perform the initial mount
+  /// (rebuild → one batch), then serve the Dioxus scheduler forever.
+  export run: async func();
+
+  /// Dispatch one DOM event to the listener registered on `target` (the
+  /// ElementId carried by new-event-listener) for the interned event name
+  /// `name`. The guest runs matching handlers synchronously (Dioxus
+  /// synthetic bubbling included) and, if a handler prevented the default,
+  /// calls `ev.prevent-default()` before returning. Renders triggered by
+  /// the event flush through the mutation channel (same task or the `run`
+  /// task, before this call's completion is observable host-side).
+  export handle-event: async func(target: u32, name: u16, payload: payload, ev: borrow<dom-event>);
+}
