@@ -1,0 +1,17 @@
+[package]
+name = "counter-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polyengine-dioxus = { path = "../.." }
+dioxus = { version = "=0.7.10", default-features = false, features = [
+  "macro",
+  "html",
+  "signals",
+  "hooks",
+] }

@@ -132,8 +132,13 @@ package polymorph:dioxus@0.1.0;
 ///        selected as properties, style namespace via style object,
 ///        dangerous_inner_html, boolean attribute removal on false).
 /// 0x0d set-text            id text:dynstr
-/// 0x0e new-event-listener  id name:strref
-/// 0x0f remove-event-listener id name:strref
+/// 0x0e new-event-listener  id name:strref flags:u8
+/// 0x0f remove-event-listener id name:strref flags:u8
+///        flags bit0 = the event bubbles (dioxus-html's event_bubbles table,
+///        looked up guest-side): the host delegates bubbling events at the
+///        mount root and attaches non-bubbling listeners per element, so it
+///        needs the same bit on removal to find the registration. Bits 1..7
+///        reserved, must be 0.
 /// 0x10 remove              id
 /// 0x11 push-root           id
 /// ```

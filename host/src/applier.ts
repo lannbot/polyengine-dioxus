@@ -13,8 +13,20 @@
 import type { OpSink, StrRef, TemplateNodeDesc } from "./decoder.ts";
 
 export interface ListenerDelegate {
-  add(el: Element, elementId: number, nameId: number, name: string): void;
-  remove(el: Element, elementId: number, nameId: number, name: string): void;
+  add(
+    el: Element,
+    elementId: number,
+    nameId: number,
+    name: string,
+    bubbles: boolean,
+  ): void;
+  remove(
+    el: Element,
+    elementId: number,
+    nameId: number,
+    name: string,
+    bubbles: boolean,
+  ): void;
 }
 
 const NS_STYLE = "style";
@@ -382,16 +394,16 @@ export class DomApplier implements OpSink {
     node.textContent = text;
   }
 
-  newEventListener(id: number, name: StrRef): void {
+  newEventListener(id: number, name: StrRef, bubbles: boolean): void {
     const el = this.#getNode(id) as Element;
     const nameStr = this.#str(name);
-    this.#delegate.add(el, id, name, nameStr);
+    this.#delegate.add(el, id, name, nameStr, bubbles);
   }
 
-  removeEventListener(id: number, name: StrRef): void {
+  removeEventListener(id: number, name: StrRef, bubbles: boolean): void {
     const el = this.#getNode(id) as Element;
     const nameStr = this.#str(name);
-    this.#delegate.remove(el, id, name, nameStr);
+    this.#delegate.remove(el, id, name, nameStr, bubbles);
   }
 
   remove(id: number): void {

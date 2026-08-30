@@ -32,13 +32,41 @@ deps:
     fi
 
 check:
-    cargo check --target wasm32-unknown-unknown
-    cargo clippy --target wasm32-unknown-unknown -- -D warnings
+    cargo check --workspace --target wasm32-unknown-unknown
+    cargo clippy --workspace --target wasm32-unknown-unknown -- -D warnings
     deno task check
 
 test:
     cargo test
     deno task test
+
+# Build the surface-probe fixture components (both transports) into
+# fixtures/build/. The full-stack host tests load these.
+fixtures:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p fixtures/build
+    cargo build -p surface-probe --target wasm32-unknown-unknown --release
+    wasm-tools component new \
+      target/wasm32-unknown-unknown/release/surface_probe.wasm \
+      -o fixtures/build/surface-probe-stream.component.wasm
+    cargo build -p surface-probe --target wasm32-unknown-unknown --release --features call-transport
+    wasm-tools component new \
+      target/wasm32-unknown-unknown/release/surface_probe.wasm \
+      -o fixtures/build/surface-probe-call.component.wasm
+    wasm-tools validate --features component-model fixtures/build/surface-probe-stream.component.wasm
+    wasm-tools validate --features component-model fixtures/build/surface-probe-call.component.wasm
+
+# Build an example app component into examples/build/.
+example name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/build
+    cargo build -p {{name}}-example --target wasm32-unknown-unknown --release
+    wasm-tools component new \
+      "target/wasm32-unknown-unknown/release/$(echo {{name}} | tr - _)_example.wasm" \
+      -o examples/build/{{name}}.component.wasm
+    wasm-tools validate --features component-model examples/build/{{name}}.component.wasm
 
 # Regenerate golden vectors (runs the Rust generator, then verifies the TS
 # decoder agrees).

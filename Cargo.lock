@@ -80,6 +80,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "counter-example"
+version = "0.1.0"
+dependencies = [
+ "dioxus",
+ "polyengine-dioxus",
+]
+
+[[package]]
 name = "darling"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -112,6 +120,28 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "dioxus"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9320593eda4f01858f046698b42441603d2af5fcb62a6c1f9046a0c2eebd6d9b"
+dependencies = [
+ "dioxus-config-macros",
+ "dioxus-core",
+ "dioxus-core-macro",
+ "dioxus-hooks",
+ "dioxus-html",
+ "dioxus-signals",
+ "dioxus-stores",
+ "subsecond",
+]
+
+[[package]]
+name = "dioxus-config-macros"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "20de015bc89c20f4ffc7b4f849943420308365fa66f991250b5c075261990a21"
 
 [[package]]
 name = "dioxus-core"
@@ -232,6 +262,30 @@ dependencies = [
  "rustc-hash",
  "tracing",
  "warnings",
+]
+
+[[package]]
+name = "dioxus-stores"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "15eaa9f2ccc5ce962d056515e61345c846a54b13a2b880cf7e8ac93faa53a178"
+dependencies = [
+ "dioxus-core",
+ "dioxus-signals",
+ "dioxus-stores-macro",
+ "generational-box",
+]
+
+[[package]]
+name = "dioxus-stores-macro"
+version = "0.7.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a13bd8a693d7042544fa3ac79698a08783bbc698d1ed257e88c5d4059e9ac476"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -784,6 +838,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dcf32d66269b5fbb8558334e8d22b657b2f7af0dd2ef56c231541099a862e464"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "surface-probe"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen",
 ]
 
 [[package]]

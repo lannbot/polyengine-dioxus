@@ -294,21 +294,26 @@ impl Batch {
         self.push_dynstr(text);
     }
 
-    /// `0x0e new-event-listener id name:strref` (name is never `none` here;
-    /// the `strref` optionality in the shared encoding is unused by this
-    /// op, per wit/world.wit's opcode table which lists `name` without an
-    /// optional annotation).
-    pub fn new_event_listener(&mut self, id: u32, name: u16) {
+    /// `0x0e new-event-listener id name:strref flags:u8` (name is never
+    /// `none` here — the `strref` sentinel is namespace-only per
+    /// wit/world.wit). `bubbles` is flags bit0: dioxus-html's event_bubbles
+    /// verdict, looked up by the caller; the host's delegation strategy
+    /// (root-delegated vs per-element) hangs off it.
+    pub fn new_event_listener(&mut self, id: u32, name: u16, bubbles: bool) {
         self.ops.push(op::NEW_EVENT_LISTENER);
         self.ops.extend_from_slice(&id.to_le_bytes());
         self.ops.extend_from_slice(&name.to_le_bytes());
+        self.ops.push(bubbles as u8);
     }
 
-    /// `0x0f remove-event-listener id name:strref`.
-    pub fn remove_event_listener(&mut self, id: u32, name: u16) {
+    /// `0x0f remove-event-listener id name:strref flags:u8` (same flags as
+    /// new-event-listener; the host needs the bubbles bit to locate the
+    /// registration it is removing).
+    pub fn remove_event_listener(&mut self, id: u32, name: u16, bubbles: bool) {
         self.ops.push(op::REMOVE_EVENT_LISTENER);
         self.ops.extend_from_slice(&id.to_le_bytes());
         self.ops.extend_from_slice(&name.to_le_bytes());
+        self.ops.push(bubbles as u8);
     }
 
     /// `0x10 remove id`.

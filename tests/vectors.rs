@@ -160,14 +160,18 @@ impl Rec {
         self.push_op(json!({"op": "set-text", "id": id, "text": text}));
     }
 
-    fn new_event_listener(&mut self, id: u32, name: u16) {
-        self.batch.new_event_listener(id, name);
-        self.push_op(json!({"op": "new-event-listener", "id": id, "name": name}));
+    fn new_event_listener(&mut self, id: u32, name: u16, bubbles: bool) {
+        self.batch.new_event_listener(id, name, bubbles);
+        self.push_op(
+            json!({"op": "new-event-listener", "id": id, "name": name, "bubbles": bubbles}),
+        );
     }
 
-    fn remove_event_listener(&mut self, id: u32, name: u16) {
-        self.batch.remove_event_listener(id, name);
-        self.push_op(json!({"op": "remove-event-listener", "id": id, "name": name}));
+    fn remove_event_listener(&mut self, id: u32, name: u16, bubbles: bool) {
+        self.batch.remove_event_listener(id, name, bubbles);
+        self.push_op(
+            json!({"op": "remove-event-listener", "id": id, "name": name, "bubbles": bubbles}),
+        );
     }
 
     fn remove(&mut self, id: u32) {
@@ -288,8 +292,8 @@ fn build_basic(rec: &mut Rec) {
     rec.set_attribute_none(2, class, None);
 
     rec.set_text(2, "t");
-    rec.new_event_listener(2, click);
-    rec.remove_event_listener(2, click);
+    rec.new_event_listener(2, click, true);
+    rec.remove_event_listener(2, click, false);
     rec.remove(2);
     rec.push_root(1);
 }
@@ -437,8 +441,8 @@ fn build_basic_split(rec: &mut Rec) {
     rec.set_attribute_bool(2, span, None, true);
     rec.set_attribute_none(2, class, None);
     rec.set_text(2, "t");
-    rec.new_event_listener(2, click);
-    rec.remove_event_listener(2, click);
+    rec.new_event_listener(2, click, true);
+    rec.remove_event_listener(2, click, false);
     rec.remove(2);
     rec.push_root(1);
 }

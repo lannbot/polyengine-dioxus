@@ -56,11 +56,11 @@ function recordingSink(ops: unknown[]): OpSink {
     setText(id, text) {
       ops.push({ op: "set-text", id, text });
     },
-    newEventListener(id, name) {
-      ops.push({ op: "new-event-listener", id, name });
+    newEventListener(id, name, bubbles) {
+      ops.push({ op: "new-event-listener", id, name, bubbles });
     },
-    removeEventListener(id, name) {
-      ops.push({ op: "remove-event-listener", id, name });
+    removeEventListener(id, name, bubbles) {
+      ops.push({ op: "remove-event-listener", id, name, bubbles });
     },
     remove(id) {
       ops.push({ op: "remove", id });

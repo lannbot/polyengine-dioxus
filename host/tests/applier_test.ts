@@ -14,11 +14,11 @@ function recordingDelegate(): { events: unknown[]; delegate: ListenerDelegate } 
   return {
     events,
     delegate: {
-      add(_el, elementId, nameId, name) {
-        events.push({ op: "add", elementId, nameId, name });
+      add(_el, elementId, nameId, name, bubbles) {
+        events.push({ op: "add", elementId, nameId, name, bubbles });
       },
-      remove(_el, elementId, nameId, name) {
-        events.push({ op: "remove", elementId, nameId, name });
+      remove(_el, elementId, nameId, name, bubbles) {
+        events.push({ op: "remove", elementId, nameId, name, bubbles });
       },
     },
   };
@@ -205,12 +205,12 @@ Deno.test("listener delegate recording for add/remove with resolved names", () =
   applier.createPlaceholder(1);
   applier.appendChildren(0, 1);
 
-  applier.newEventListener(1, 0);
-  applier.removeEventListener(1, 0);
+  applier.newEventListener(1, 0, true);
+  applier.removeEventListener(1, 0, false);
 
   assertEquals(events, [
-    { op: "add", elementId: 1, nameId: 0, name: "click" },
-    { op: "remove", elementId: 1, nameId: 0, name: "click" },
+    { op: "add", elementId: 1, nameId: 0, name: "click", bubbles: true },
+    { op: "remove", elementId: 1, nameId: 0, name: "click", bubbles: false },
   ]);
 });
 

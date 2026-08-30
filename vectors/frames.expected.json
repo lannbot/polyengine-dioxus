@@ -147,11 +147,13 @@
         "text": "t"
       },
       {
+        "bubbles": true,
         "id": 2,
         "name": 5,
         "op": "new-event-listener"
       },
       {
+        "bubbles": false,
         "id": 2,
         "name": 5,
         "op": "remove-event-listener"

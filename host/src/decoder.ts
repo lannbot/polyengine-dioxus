@@ -37,8 +37,8 @@ export interface OpSink {
   setAttributeBool(id: number, name: StrRef, ns: StrRef | null, value: boolean): void;
   setAttributeNone(id: number, name: StrRef, ns: StrRef | null): void;
   setText(id: number, text: string): void;
-  newEventListener(id: number, name: StrRef): void;
-  removeEventListener(id: number, name: StrRef): void;
+  newEventListener(id: number, name: StrRef, bubbles: boolean): void;
+  removeEventListener(id: number, name: StrRef, bubbles: boolean): void;
   remove(id: number): void;
   pushRoot(id: number): void;
 }
@@ -295,13 +295,17 @@ export function decodeBatch(ops: Uint8Array, strings: string, sink: OpSink): voi
       case OP_NEW_EVENT_LISTENER: {
         const id = c.u32();
         const name = c.u16();
-        sink.newEventListener(id, name);
+        // flags:u8, bit0 = bubbles (dioxus-html event_bubbles verdict,
+        // guest-computed); bits 1..7 reserved.
+        const bubbles = (c.u8() & 1) !== 0;
+        sink.newEventListener(id, name, bubbles);
         break;
       }
       case OP_REMOVE_EVENT_LISTENER: {
         const id = c.u32();
         const name = c.u16();
-        sink.removeEventListener(id, name);
+        const bubbles = (c.u8() & 1) !== 0;
+        sink.removeEventListener(id, name, bubbles);
         break;
       }
       case OP_REMOVE: {
