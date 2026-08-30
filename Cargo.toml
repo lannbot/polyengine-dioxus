@@ -7,7 +7,16 @@ description = "Dioxus renderer for components running on polyengine: batched DOM
 publish = false
 
 [dependencies]
-wit-bindgen = { version = "=0.60.0", features = ["async-spawn"] }
+# `inter-task-wakeup`: the driver's `run` task parks in `wait_for_work()`
+# waiting on a Rust-originating mpsc receiver waker; `handle-event` is a
+# *separate* export task that wakes it (Dioxus's scheduler wiring, not a
+# WIT-visible waitable). Without this feature, wit-bindgen 0.60's default
+# `inter_task_wakeup_disabled` shim panics
+# ("Rust task cannot sleep waiting only on Rust-originating events...") the
+# moment a cross-task wake actually happens — i.e. on the first event
+# dispatch, not at mount. See src/driver.rs's module doc for the parking
+# design this feature makes sound.
+wit-bindgen = { version = "=0.60.0", features = ["async-spawn", "inter-task-wakeup"] }
 dioxus-core = "=0.7.10"
 # `event_bubbles` lives in dioxus-core-types (a zero-dep root crate), NOT in
 # dioxus-html; it is already in the tree via dioxus-core, so naming it
