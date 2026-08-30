@@ -1,0 +1,310 @@
+import { assertEquals } from "jsr:@std/assert@1";
+import { parseHTML } from "linkedom";
+import { EventDispatcher, serializePayload } from "../src/events.ts";
+
+function makeRoot() {
+  const { document } = parseHTML("<!doctype html><html><body><div id=root></div></body></html>");
+  const root = document.getElementById("root")!;
+  return { document, root };
+}
+
+type Recorded = { elementId: number; nameId: number; name: string; ev: unknown };
+
+function recordingSink(): { sink: (e: number, n: number, name: string, ev: unknown) => void; calls: Recorded[] } {
+  const calls: Recorded[] = [];
+  return {
+    calls,
+    sink: (elementId, nameId, name, ev) => calls.push({ elementId, nameId, name, ev }),
+  };
+}
+
+// -- registration / delegation lifecycle -------------------------------------
+
+Deno.test("bubbling: one root listener refcounted across elements", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const a = document.createElement("button");
+  const b = document.createElement("button");
+  root.appendChild(a);
+  root.appendChild(b);
+
+  dispatcher.add(a, 1, 10, "click", true);
+  dispatcher.add(b, 2, 10, "click", true);
+
+  assertEquals(a.getAttribute("data-dioxus-id"), "1");
+  assertEquals(b.getAttribute("data-dioxus-id"), "2");
+
+  // Both resolve through the single delegated root listener.
+  a.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0], { elementId: 1, nameId: 10, name: "click", ev: calls[0].ev });
+
+  b.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1].elementId, 2);
+
+  dispatcher.remove(a, 1, 10, "click", true);
+  assertEquals(a.hasAttribute("data-dioxus-id"), false, "attribute dropped once last listener removed");
+  dispatcher.remove(b, 2, 10, "click", true);
+  assertEquals(b.hasAttribute("data-dioxus-id"), false);
+});
+
+Deno.test("non-bubbling: per-element listener, independent of other elements", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("input");
+  root.appendChild(el);
+  dispatcher.add(el, 5, 20, "focus", false);
+
+  el.dispatchEvent(new document.defaultView!.Event("focus"));
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].elementId, 5);
+
+  dispatcher.remove(el, 5, 20, "focus", false);
+  assertEquals(el.hasAttribute("data-dioxus-id"), false);
+});
+
+Deno.test("data-dioxus-id persists while other registrations remain on the element", () => {
+  const { document, root } = makeRoot();
+  const { sink } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("div");
+  root.appendChild(el);
+  dispatcher.add(el, 3, 1, "click", true);
+  dispatcher.add(el, 3, 2, "keydown", true);
+
+  dispatcher.remove(el, 3, 1, "click", true);
+  assertEquals(el.getAttribute("data-dioxus-id"), "3", "keydown registration still live");
+
+  dispatcher.remove(el, 3, 2, "keydown", true);
+  assertEquals(el.hasAttribute("data-dioxus-id"), false);
+});
+
+// -- target resolution --------------------------------------------------------
+
+Deno.test("dispatchTo walks ancestors to the first element with a matching registration", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const outer = document.createElement("section");
+  const inner = document.createElement("span");
+  outer.appendChild(inner);
+  root.appendChild(outer);
+
+  dispatcher.add(outer, 7, 1, "click", true);
+
+  // `inner` has no data-dioxus-id of its own; dispatchTo must walk up to
+  // `outer` (which does, and has a "click" registration).
+  dispatcher.dispatchTo(inner, "click", { type: "click" });
+  assertEquals(calls, [{ elementId: 7, nameId: 1, name: "click", ev: { type: "click" } }]);
+});
+
+Deno.test("dispatchTo skips an ancestor's data-dioxus-id if it lacks a registration for this name", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const outer = document.createElement("section");
+  const middle = document.createElement("div");
+  const inner = document.createElement("span");
+  outer.appendChild(middle);
+  middle.appendChild(inner);
+  root.appendChild(outer);
+
+  // `middle` has an id (registered for "keydown" only); "click" is only
+  // registered on `outer`. The walk must skip past `middle`.
+  dispatcher.add(middle, 8, 2, "keydown", true);
+  dispatcher.add(outer, 9, 1, "click", true);
+
+  dispatcher.dispatchTo(inner, "click", { type: "click" });
+  assertEquals(calls, [{ elementId: 9, nameId: 1, name: "click", ev: { type: "click" } }]);
+});
+
+Deno.test("dispatchTo is a no-op when no ancestor has a matching registration", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("div");
+  root.appendChild(el);
+
+  dispatcher.dispatchTo(el, "click", { type: "click" });
+  assertEquals(calls, []);
+});
+
+// -- payload family mapping / value shapes -----------------------------------
+
+Deno.test("serializePayload: mouse family with full field mapping + modifiers", () => {
+  const payload = serializePayload("click", {
+    type: "click",
+    clientX: 10,
+    clientY: 20,
+    pageX: 11,
+    pageY: 21,
+    screenX: 12,
+    screenY: 22,
+    offsetX: 1,
+    offsetY: 2,
+    button: 0,
+    buttons: 1,
+    altKey: true,
+    shiftKey: true,
+  });
+  assertEquals(payload, {
+    kind: "mouse",
+    value: {
+      clientX: 10,
+      clientY: 20,
+      pageX: 11,
+      pageY: 21,
+      screenX: 12,
+      screenY: 22,
+      offsetX: 1,
+      offsetY: 2,
+      button: 0,
+      buttons: 1,
+      mods: { alt: true, shift: true },
+    },
+  });
+});
+
+Deno.test("serializePayload: mouse defensive defaults for a duck-typed event missing fields", () => {
+  const payload = serializePayload("mouseenter", { type: "mouseenter" }) as {
+    kind: string;
+    value: Record<string, unknown>;
+  };
+  assertEquals(payload.kind, "mouse");
+  assertEquals(payload.value.clientX, 0);
+  assertEquals(payload.value.button, -1, "no applicable button -> -1 per wit doc");
+  assertEquals(payload.value.mods, {}, "no true flags -> empty object");
+});
+
+Deno.test("serializePayload: pointer family nests mouse-data", () => {
+  const payload = serializePayload("pointerdown", {
+    type: "pointerdown",
+    clientX: 5,
+    pointerId: 3,
+    pointerType: "touch",
+    isPrimary: true,
+  }) as { kind: string; value: { mouse: { clientX: number }; pointerId: number; pointerType: string } };
+  assertEquals(payload.kind, "pointer");
+  assertEquals(payload.value.mouse.clientX, 5);
+  assertEquals(payload.value.pointerId, 3);
+  assertEquals(payload.value.pointerType, "touch");
+});
+
+Deno.test("serializePayload: keyboard family", () => {
+  const payload = serializePayload("keydown", {
+    type: "keydown",
+    key: "Enter",
+    code: "Enter",
+    ctrlKey: true,
+  });
+  assertEquals(payload, {
+    kind: "keyboard",
+    value: {
+      key: "Enter",
+      code: "Enter",
+      location: 0,
+      repeat: false,
+      isComposing: false,
+      mods: { ctrl: true },
+    },
+  });
+});
+
+Deno.test("serializePayload: wheel family nests mouse-data", () => {
+  const payload = serializePayload("wheel", {
+    type: "wheel",
+    deltaY: 100,
+    deltaMode: 1,
+  }) as { kind: string; value: { deltaY: number; deltaMode: number; mouse: unknown } };
+  assertEquals(payload.kind, "wheel");
+  assertEquals(payload.value.deltaY, 100);
+  assertEquals(payload.value.deltaMode, 1);
+});
+
+Deno.test("serializePayload: form family — input/change read value/checked off the target", () => {
+  const { document } = makeRoot();
+  const input = document.createElement("input") as unknown as { value: string; checked: boolean };
+  input.value = "hello";
+  input.checked = true;
+
+  const payload = serializePayload("input", { type: "input", target: input as unknown as EventTarget });
+  assertEquals(payload, { kind: "form", value: { value: "hello", checked: true, values: [] } });
+});
+
+Deno.test("serializePayload: checkbox folds checked into value (dioxus FormData::checked derivation)", () => {
+  // dioxus derives checked() by parsing the value ("true"/"false"), per
+  // dioxus-web's serializer convention — the real value is intentionally
+  // replaced for checkboxes (ref:serialize.ts:185).
+  const checkbox = { type: "checkbox", value: "on", checked: true };
+  const payload = serializePayload("change", {
+    type: "change",
+    target: checkbox as unknown as EventTarget,
+  });
+  assertEquals(payload, { kind: "form", value: { value: "true", checked: true, values: [] } });
+
+  const unchecked = { type: "checkbox", value: "on", checked: false };
+  const payload2 = serializePayload("change", {
+    type: "change",
+    target: unchecked as unknown as EventTarget,
+  });
+  assertEquals(payload2, { kind: "form", value: { value: "false", checked: false, values: [] } });
+});
+
+Deno.test("serializePayload: submit collects FormData-shaped entries from the target form", () => {
+  // Duck-typed rather than a real linkedom <form> (whose `tagName` is a
+  // getter-only accessor) — this is a defensive-read path anyway, so the
+  // family-mapping code must accept a plain object shaped like a form.
+  const form = {
+    tagName: "FORM",
+    elements: [
+      { name: "username", value: "alice" },
+      { name: "agree", type: "checkbox", value: "on", checked: true },
+      { name: "unchecked", type: "checkbox", value: "on", checked: false },
+      { name: "ignored", value: "x", disabled: true },
+    ],
+  };
+
+  const payload = serializePayload("submit", {
+    type: "submit",
+    target: form as unknown as EventTarget,
+  }) as { kind: string; value: { values: [string, string[]][] } };
+  assertEquals(payload.kind, "form");
+  assertEquals(payload.value.values, [
+    ["username", ["alice"]],
+    ["agree", ["on"]],
+  ]);
+  // Note: this plain-object duck type has no native FormData fidelity
+  // (radio groups, multi-select) — this covers the checkbox/basic shape
+  // the dispatch asks for and flags the fidelity gap rather than fighting
+  // linkedom for a full HTMLFormElement.
+});
+
+Deno.test("serializePayload: scroll family reads scrollable metrics off the target", () => {
+  const target = { scrollTop: 5, scrollLeft: 6, scrollWidth: 100, scrollHeight: 200, clientWidth: 50, clientHeight: 60 };
+  const payload = serializePayload("scroll", { type: "scroll", currentTarget: target as unknown as EventTarget });
+  assertEquals(payload, {
+    kind: "scroll",
+    value: {
+      scrollTop: 5,
+      scrollLeft: 6,
+      scrollWidth: 100,
+      scrollHeight: 200,
+      clientWidth: 50,
+      clientHeight: 60,
+    },
+  });
+});
+
+Deno.test("serializePayload: unmapped event names dispatch as empty", () => {
+  assertEquals(serializePayload("resize", { type: "resize" }), { kind: "empty" });
+  assertEquals(serializePayload("visible", { type: "visible" }), { kind: "empty" });
+});

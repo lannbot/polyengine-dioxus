@@ -1,0 +1,9 @@
+[package]
+name = "subsecond"
+version = "0.7.10"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Inert stand-in for dioxus's `subsecond` hot-patching crate, used via [patch.crates-io] to keep js-sys/web-sys out of the wasm component build"
+publish = false
+
+[dependencies]

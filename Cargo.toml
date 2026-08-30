@@ -9,10 +9,22 @@ publish = false
 [dependencies]
 wit-bindgen = { version = "=0.60.0", features = ["async-spawn"] }
 dioxus-core = "=0.7.10"
+# `event_bubbles` lives in dioxus-core-types (a zero-dep root crate), NOT in
+# dioxus-html; it is already in the tree via dioxus-core, so naming it
+# directly costs nothing.
+dioxus-core-types = "=0.7.10"
 dioxus-html = { version = "=0.7.10", default-features = false }
 
 [dev-dependencies]
 serde_json = "1"
+# Native-only: `rsx!` for driving a real VirtualDom through the writer in unit
+# tests. Dev-dependencies do not enter the wasm32 component build.
+dioxus = { version = "=0.7.10", default-features = false, features = [
+  "macro",
+  "html",
+  "signals",
+  "hooks",
+] }
 
 [workspace]
 members = [".", "fixtures/surface-probe", "examples/counter"]
@@ -23,3 +35,13 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "debuginfo"
+
+# Replace dioxus-core's `subsecond` hot-patching dependency with an inert
+# stub. Upstream's wasm32 implementation pulls in js-sys/web-sys/wasm-bindgen,
+# whose `__wbindgen_describe_*` exports are GC roots and drag the
+# `__wbindgen_placeholder__` imports into the module — which `wasm-tools
+# component new` cannot bind to any WIT interface, so componentization fails.
+# Hot-patching cannot work in a polyengine component anyway (no fetch, no JS
+# glue). See stubs/subsecond/src/lib.rs for the full rationale.
+[patch.crates-io]
+subsecond = { path = "stubs/subsecond" }

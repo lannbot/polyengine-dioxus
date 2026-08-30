@@ -11,6 +11,6 @@
   },
   "tasks": {
     "check": "deno check host/src host/tests",
-    "test": "deno test --allow-read host/tests/"
+    "test": "deno test --allow-read=. host/tests/"
   }
 }

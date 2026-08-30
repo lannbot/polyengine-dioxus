@@ -1,0 +1,194 @@
+// Host runtime wiring for polymorph:dioxus — instantiation, both mutation
+// transports, and DOM event dispatch back into the guest.
+//
+// Governing docs: wit/world.wit (world `app`, interface `surface`), and
+// .deps/polyengine/contracts/embedder-api.md ("Module wiring and
+// instantiation", "Resources", "Streams and futures" amendment A21, "Value
+// mapping"). Cited inline as `contract:<section>`.
+
+import { instantiate } from "@deltic/runtime/embedder";
+import type { Translator } from "@deltic/runtime/shim";
+import type { DirectSource, Stream } from "@deltic/protocol";
+
+import { DomApplier } from "./applier.ts";
+import { FrameDecoder, decodeBatch } from "./decoder.ts";
+import { EventDispatcher, serializePayload } from "./events.ts";
+import type { NativeEventLike } from "./events.ts";
+
+export interface MountOptions {
+  componentBytes: Uint8Array;
+  /** The @deltic/translator instance (or translator-shim bytes — see
+   * embedder-api.md "Module wiring and instantiation" §"Untranslated
+   * artifacts" A3). Typed `unknown` here per the dispatch's contract. */
+  translator: unknown;
+  root: Element;
+  /** run-task rejection, or a stream session failure (stream transport
+   * only) — surfaces asynchronously since `run`'s promise is held open,
+   * never awaited (wit: "its promise never settles in normal operation"). */
+  onError?: (err: unknown) => void;
+}
+
+export interface Mounted {
+  dispose(): void;
+  /** Exposed for tests: the DOM applier the mutation stream/flush feeds. */
+  applier: DomApplier;
+  /** Exposed for tests: the event dispatcher wired as the applier's
+   * ListenerDelegate. */
+  dispatcher: EventDispatcher;
+  /** Exposed for tests: the stream-transport frame decoder (created
+   * regardless of transport; only fed under the stream transport). Lets a
+   * test confirm the zero-copy direct-read path actually engaged —
+   * `pending()` returns 0 once every delivered byte has been decoded into
+   * whole frames, with no heavier instrumentation needed. */
+  frameDecoder: FrameDecoder;
+  /** Dispatch a native-event-like value at `targetEl` for `name`, exactly
+   * as a real DOM listener would (used by fullstack tests and by real
+   * event listeners alike). */
+  dispatch(targetEl: Element | null, name: string, ev: NativeEventLike): void;
+}
+
+/**
+ * A host-implemented resource class for `surface.dom-event`
+ * (contracts/embedder-api.md "Resources": "the host provides a plain class
+ * implementing the bindgen-emitted interface"). Constructed per dispatched
+ * event and passed as the `ev: borrow<dom-event>` argument to
+ * `handle-event`; the guest must not retain it past that call (CABI-
+ * enforced borrow scoping, not this class's job).
+ *
+ * `preventDefault`/`stopPropagation` call through to the native Event
+ * unconditionally — even after the dispatch that lent this instance has
+ * completed. wit/world.wit's dom-event doc says calling either "after the
+ * originating dispatch has completed is a harmless no-op": the DOM itself
+ * makes a post-dispatch `preventDefault()` a no-op (dispatch has already
+ * decided whether to honor it) and a post-dispatch `stopPropagation()` has
+ * nothing left to stop, so this is free — no completion-tracking needed.
+ */
+class DomEvent {
+  #native: NativeEventLike;
+
+  constructor(native: NativeEventLike) {
+    this.#native = native;
+  }
+
+  preventDefault(): void {
+    this.#native.preventDefault?.();
+  }
+
+  stopPropagation(): void {
+    this.#native.stopPropagation?.();
+  }
+}
+
+/** Mount a polymorph:dioxus app component into `opts.root`.
+ *
+ * Builds a `DomApplier` over the root (with an `EventDispatcher` as its
+ * `ListenerDelegate`), instantiates the component with the `surface`
+ * imports wired per contracts/embedder-api.md "Module wiring and
+ * instantiation" (imports keyed by the verbatim interface id), starts
+ * `run()` (holding its never-settling promise open), and returns a handle
+ * for dispatching DOM events and (best-effort) tearing down.
+ */
+export async function mountApp(opts: MountOptions): Promise<Mounted> {
+  const dispatcher = new EventDispatcher(opts.root, (elementId, nameId, name, ev) => {
+    dispatchEvent(elementId, nameId, name, ev);
+  });
+  const applier = new DomApplier(opts.root, dispatcher);
+  const frameDecoder = new FrameDecoder(applier);
+
+  let disposed = false;
+  const onError = opts.onError ?? (() => {});
+
+  // `handleEvent` is bound once instantiation gives us `exports`; event
+  // dispatch attempted before `run()` has wired listeners is simply a
+  // no-op (there is nothing registered to resolve a target against yet).
+  // deno-lint-ignore no-explicit-any
+  let handleEventExport: ((...a: any[]) => unknown) | undefined;
+
+  function dispatchEvent(elementId: number, nameId: number, name: string, ev: NativeEventLike): void {
+    if (disposed || !handleEventExport) return;
+    const payload = serializePayload(name, ev);
+    const domEvent = new DomEvent(ev);
+    // Export calls are uniformly Promise-shaped (embedder-api.md
+    // "Functions and async"); we don't await it (fire-and-forget from the
+    // DOM listener's perspective — the guest's own re-render flows through
+    // the mutation channel independently), but a rejection must not become
+    // an unhandled rejection.
+    Promise.resolve(handleEventExport(elementId, nameId, payload, domEvent)).catch(onError);
+  }
+
+  const imports = {
+    "polymorph:dioxus/surface@0.1.0": {
+      // Stream transport: park a direct-read session for the instance's
+      // lifetime. We always consume the FULL view per rendezvous — whole
+      // frames decoded+applied, any partial tail staged in the
+      // FrameDecoder — so `readDirect`'s "never acknowledge zero bytes"
+      // hazard (embedder-api.md amendment A21) never arises: `markRead`
+      // always receives `view.length`, never 0.
+      open: async (stream: Stream<Uint8Array>): Promise<void> => {
+        const consume = (src: DirectSource): "more" | "done" => {
+          const view = src.remaining();
+          const n = frameDecoder.feed(view);
+          if (n < view.length) {
+            frameDecoder.stashRest(view, n);
+          }
+          // The callback runs DOM application only (decodeBatch via the
+          // FrameDecoder) — it never calls back into guest code, honoring
+          // the A21 reentrancy rule ("calls that can run guest code ...
+          // are forbidden" inside a direct-read callback).
+          src.markRead(view.length);
+          return "more";
+        };
+        // Hold the session; it only settles on stream end/drop/fault,
+        // which for a healthy long-lived `run()` task never happens in
+        // normal operation. Route a rejection (peer trap, teardown) to
+        // onError rather than letting it become unhandled.
+        stream.readDirect(consume).catch(onError);
+      },
+      // Call transport: one synchronous import per batch. `strings` is
+      // already a host string at the lift (contract "call transport"
+      // doc); decodeBatch slices it directly, no framing needed (unlike
+      // the stream transport, this transport IS exactly one batch).
+      flush: (ops: Uint8Array, strings: string): void => {
+        decodeBatch(ops, strings, applier);
+      },
+      DomEvent,
+    },
+  };
+
+  const instance = await instantiate(
+    { componentBytes: opts.componentBytes, translator: opts.translator as Uint8Array | Translator },
+    imports,
+  );
+
+  handleEventExport = instance.exports.handleEvent as (...a: unknown[]) => unknown;
+
+  // `run` is a long-lived task (wit: "its promise never settles in normal
+  // operation" — it opens the channel, mounts, then serves the scheduler
+  // forever). We intentionally do not await it; hold the promise so a
+  // rejection is observable via onError instead of an unhandled rejection.
+  Promise.resolve(instance.exports.run()).catch((err: unknown) => {
+    if (!disposed) onError(err);
+  });
+
+  const mounted: Mounted = {
+    applier,
+    dispatcher,
+    frameDecoder,
+    dispatch(targetEl, name, ev) {
+      dispatcher.dispatchTo(targetEl, name, ev);
+    },
+    dispose() {
+      // Best-effort teardown: the embedder API (contracts/embedder-api.md
+      // "Module wiring and instantiation") exposes no instance-level
+      // dispose/drop — `EmbedderInstance` is `{ exports, handle, imports }`
+      // with no teardown method, and per-`Stream`/`Future` disposal is the
+      // only documented release path. We therefore just mark ourselves
+      // disposed (suppressing further dispatch/onError activity); the
+      // stream's direct-read session, if any, is released when the
+      // component instance itself is garbage-collected or traps. If a
+      // future embedder-api revision adds instance disposal, wire it here.
+      disposed = true;
+    },
+  };
+  return mounted;
+}

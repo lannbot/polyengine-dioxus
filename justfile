@@ -54,8 +54,8 @@ fixtures:
     wasm-tools component new \
       target/wasm32-unknown-unknown/release/surface_probe.wasm \
       -o fixtures/build/surface-probe-call.component.wasm
-    wasm-tools validate --features component-model fixtures/build/surface-probe-stream.component.wasm
-    wasm-tools validate --features component-model fixtures/build/surface-probe-call.component.wasm
+    wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe-stream.component.wasm
+    wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe-call.component.wasm
 
 # Build an example app component into examples/build/.
 example name:
@@ -66,7 +66,7 @@ example name:
     wasm-tools component new \
       "target/wasm32-unknown-unknown/release/$(echo {{name}} | tr - _)_example.wasm" \
       -o examples/build/{{name}}.component.wasm
-    wasm-tools validate --features component-model examples/build/{{name}}.component.wasm
+    wasm-tools validate --features component-model,cm-async examples/build/{{name}}.component.wasm
 
 # Regenerate golden vectors (runs the Rust generator, then verifies the TS
 # decoder agrees).
