@@ -73,8 +73,11 @@ package polymorph:dioxus@0.1.0;
 /// tmpl   : u16   — guest-assigned template id
 /// path   : u8 length, then that many u8 child indices
 /// strref : u16   — interned string id, defined by a prior cache-string op
-///                  (in this or any earlier batch). 0xffff = none where the
-///                  operand is optional (namespaces).
+///                  (in this or any earlier batch). The value 0xffff is a
+///                  "none" sentinel admitted ONLY by namespace operands
+///                  (every `ns:strref` below, including template element and
+///                  template attribute namespaces); tag/name operands are
+///                  mandatory ids and never carry the sentinel.
 /// dynstr : u16 UTF-16 code-unit length, then (iff 0xffff) u32 actual
 ///          length. Content is the next `length` code units of the decoded
 ///          string segment, consumed sequentially. The encoder appends the
@@ -121,7 +124,10 @@ package polymorph:dioxus@0.1.0;
 ///          0x01 float  f64
 ///          0x02 int    s64
 ///          0x03 bool   u8
-///          0x04 none   (remove the attribute)
+///          0x04 none   (remove the attribute unconditionally — routed via
+///                       removeAttribute/removeAttributeNS/style.removeProperty
+///                       as the name/namespace dictates; the boolean-attribute
+///                       truthiness table governs only text/bool VALUES)
 ///        The host applies Dioxus's attribute semantics (value/checked/
 ///        selected as properties, style namespace via style object,
 ///        dangerous_inner_html, boolean attribute removal on false).

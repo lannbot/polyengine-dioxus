@@ -603,6 +603,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus-core",
  "dioxus-html",
+ "serde_json",
  "wit-bindgen",
 ]
 

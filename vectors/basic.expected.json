@@ -1,0 +1,167 @@
+{
+  "frames": [
+    [
+      {
+        "id": 0,
+        "op": "cache-string",
+        "s": "div"
+      },
+      {
+        "id": 1,
+        "op": "cache-string",
+        "s": "span"
+      },
+      {
+        "id": 2,
+        "op": "cache-string",
+        "s": "class"
+      },
+      {
+        "id": 3,
+        "op": "cache-string",
+        "s": "style"
+      },
+      {
+        "id": 4,
+        "op": "cache-string",
+        "s": "http://www.w3.org/2000/svg"
+      },
+      {
+        "id": 5,
+        "op": "cache-string",
+        "s": "click"
+      },
+      {
+        "op": "register-template",
+        "roots": [
+          {
+            "kind": "dynamic"
+          }
+        ],
+        "tmpl": 0
+      },
+      {
+        "id": 1,
+        "op": "load-template",
+        "root": 0,
+        "tmpl": 0
+      },
+      {
+        "id": 2,
+        "op": "create-placeholder"
+      },
+      {
+        "id": 3,
+        "op": "create-text-node",
+        "text": "hello"
+      },
+      {
+        "id": 1,
+        "m": 2,
+        "op": "append-children"
+      },
+      {
+        "id": 5,
+        "op": "assign-id",
+        "path": [
+          0,
+          1
+        ]
+      },
+      {
+        "id": 9,
+        "m": 1,
+        "op": "replace-with"
+      },
+      {
+        "m": 2,
+        "op": "replace-placeholder",
+        "path": [
+          0
+        ]
+      },
+      {
+        "id": 3,
+        "m": 1,
+        "op": "insert-after"
+      },
+      {
+        "id": 3,
+        "m": 1,
+        "op": "insert-before"
+      },
+      {
+        "id": 2,
+        "name": 2,
+        "ns": null,
+        "op": "set-attribute",
+        "value": {
+          "kind": "text",
+          "s": "x"
+        }
+      },
+      {
+        "id": 2,
+        "name": 3,
+        "ns": 4,
+        "op": "set-attribute",
+        "value": {
+          "f": 1.5,
+          "kind": "float"
+        }
+      },
+      {
+        "id": 2,
+        "name": 0,
+        "ns": null,
+        "op": "set-attribute",
+        "value": {
+          "i": "-3",
+          "kind": "int"
+        }
+      },
+      {
+        "id": 2,
+        "name": 1,
+        "ns": null,
+        "op": "set-attribute",
+        "value": {
+          "b": true,
+          "kind": "bool"
+        }
+      },
+      {
+        "id": 2,
+        "name": 2,
+        "ns": null,
+        "op": "set-attribute",
+        "value": {
+          "kind": "none"
+        }
+      },
+      {
+        "id": 2,
+        "op": "set-text",
+        "text": "t"
+      },
+      {
+        "id": 2,
+        "name": 5,
+        "op": "new-event-listener"
+      },
+      {
+        "id": 2,
+        "name": 5,
+        "op": "remove-event-listener"
+      },
+      {
+        "id": 2,
+        "op": "remove"
+      },
+      {
+        "id": 1,
+        "op": "push-root"
+      }
+    ]
+  ]
+}

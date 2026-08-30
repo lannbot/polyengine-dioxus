@@ -1,0 +1,100 @@
+{
+  "frames": [
+    [
+      {
+        "id": 0,
+        "op": "cache-string",
+        "s": "div"
+      },
+      {
+        "id": 1,
+        "op": "cache-string",
+        "s": "span"
+      },
+      {
+        "id": 2,
+        "op": "cache-string",
+        "s": "class"
+      },
+      {
+        "id": 3,
+        "op": "cache-string",
+        "s": "style"
+      },
+      {
+        "id": 4,
+        "op": "cache-string",
+        "s": "http://www.w3.org/2000/svg"
+      },
+      {
+        "op": "register-template",
+        "roots": [
+          {
+            "attrs": [
+              {
+                "name": 2,
+                "ns": null,
+                "value": "container"
+              }
+            ],
+            "children": [
+              {
+                "attrs": [
+                  {
+                    "name": 3,
+                    "ns": 4,
+                    "value": "color:red"
+                  }
+                ],
+                "children": [
+                  {
+                    "kind": "text",
+                    "value": "hello"
+                  },
+                  {
+                    "kind": "dynamic"
+                  }
+                ],
+                "kind": "element",
+                "ns": 4,
+                "tag": 1
+              },
+              {
+                "kind": "text",
+                "value": "world"
+              }
+            ],
+            "kind": "element",
+            "ns": null,
+            "tag": 0
+          },
+          {
+            "kind": "dynamic"
+          }
+        ],
+        "tmpl": 0
+      },
+      {
+        "id": 10,
+        "op": "load-template",
+        "root": 0,
+        "tmpl": 0
+      },
+      {
+        "id": 11,
+        "op": "assign-id",
+        "path": [
+          0,
+          1
+        ]
+      },
+      {
+        "m": 1,
+        "op": "replace-placeholder",
+        "path": [
+          0
+        ]
+      }
+    ]
+  ]
+}
