@@ -1,7 +1,8 @@
 // Static file server for the E2E lane (owned by e2e/). Serves the
-// harness/ directory (index.html, dist/*) at "/" and additionally maps
-// "/counter.component.wasm" to examples/build/counter.component.wasm
-// (built by `just example counter`, outside harness/'s own tree).
+// harness/ directory (index.html, dist/*, todomvc.css) at "/" and
+// additionally maps "/<name>.component.wasm" to
+// examples/build/<name>.component.wasm (built by `just example <name>`,
+// outside harness/'s own tree) for each known example.
 //
 // MANDATORY per dispatch: bind port 0, print the real port so the caller
 // can parse it — never hard-code a port (parallel worktrees collide).
@@ -14,13 +15,15 @@ import { dirname, fromFileUrl } from "jsr:@std/path@1";
 
 const repoRoot = normalize(join(dirname(fromFileUrl(import.meta.url)), ".."));
 const harnessDir = join(repoRoot, "harness");
-const componentPath = join(repoRoot, "examples", "build", "counter.component.wasm");
+const buildDir = join(repoRoot, "examples", "build");
+const KNOWN_APPS = ["counter", "todomvc"];
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".wasm": "application/wasm",
+  ".css": "text/css; charset=utf-8",
 };
 
 async function serveFile(path: string): Promise<Response> {
@@ -41,8 +44,11 @@ function handler(req: Request): Promise<Response> {
   let pathname = url.pathname;
   if (pathname === "/") pathname = "/index.html";
 
-  if (pathname === "/counter.component.wasm") {
-    return serveFile(componentPath);
+  if (pathname.endsWith(".component.wasm")) {
+    const name = pathname.slice(1, -".component.wasm".length);
+    if (KNOWN_APPS.includes(name)) {
+      return serveFile(join(buildDir, `${name}.component.wasm`));
+    }
   }
 
   // Path-traversal guard: reject any resolved path outside harnessDir.

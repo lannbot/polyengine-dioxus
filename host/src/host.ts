@@ -103,16 +103,57 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   // deno-lint-ignore no-explicit-any
   let handleEventExport: ((...a: any[]) => unknown) | undefined;
 
+  // Reentrancy guard: while a `handle-event` export call is in flight, the
+  // guest's own synchronous DOM mutations (issued mid-call, before the
+  // call's promise settles — e.g. `replaceWith`ing a focused `<input>` out
+  // of the DOM) can make the browser fire a SECOND, synchronous native
+  // event (`focusout`/`blur`) before the first call returns. Entering the
+  // same component instance a second time while the first entry is still
+  // on the stack is forbidden by the component model (observed: "Trap:
+  // cannot enter component instance 0 (reentrance forbidden)" — see
+  // .deps/polyengine/docs/architecture.md's `enter-sync-call` gate,
+  // cited by the trap message's own wording). This is a genuine host-side
+  // scheduling gap, not a guest bug: TodoMVC's edit-flow
+  // (`onkeydown` Enter -> `is_editing.set(false)` -> re-render replaces
+  // `.edit` with `.view` -> browser fires `focusout` on the now-detached,
+  // still-focused input -> its own `onfocusout` handler tries to dispatch
+  // reentrantly) is exactly this pattern, and is unremarkable app code
+  // (examples/todomvc/src/lib.rs's `TodoEntry`, ported verbatim from
+  // dioxus's own example).
+  //
+  // Fix: serialize entries into the guest. A reentrant dispatch attempt is
+  // queued (payload/DomEvent captured immediately, before queueing, since
+  // the native event object may be stale by the time it is replayed) and
+  // replayed once the in-flight call's promise settles, preserving
+  // dispatch order without ever holding two live entries into the same
+  // instance.
+  let guestCallInFlight = false;
+  const pendingDispatches: Array<() => void> = [];
+
   function dispatchEvent(elementId: number, nameId: number, name: string, ev: NativeEventLike): void {
     if (disposed || !handleEventExport) return;
     const payload = serializePayload(name, ev);
     const domEvent = new DomEvent(ev);
-    // Export calls are uniformly Promise-shaped (embedder-api.md
-    // "Functions and async"); we don't await it (fire-and-forget from the
-    // DOM listener's perspective — the guest's own re-render flows through
-    // the mutation channel independently), but a rejection must not become
-    // an unhandled rejection.
-    Promise.resolve(handleEventExport(elementId, nameId, payload, domEvent)).catch(onError);
+    const enter = () => {
+      guestCallInFlight = true;
+      // Export calls are uniformly Promise-shaped (embedder-api.md
+      // "Functions and async"); we don't await it (fire-and-forget from
+      // the DOM listener's perspective — the guest's own re-render flows
+      // through the mutation channel independently), but a rejection must
+      // not become an unhandled rejection.
+      Promise.resolve(handleEventExport!(elementId, nameId, payload, domEvent))
+        .catch(onError)
+        .finally(() => {
+          guestCallInFlight = false;
+          const next = pendingDispatches.shift();
+          if (next) next();
+        });
+    };
+    if (guestCallInFlight) {
+      pendingDispatches.push(enter);
+    } else {
+      enter();
+    }
   }
 
   const imports = {

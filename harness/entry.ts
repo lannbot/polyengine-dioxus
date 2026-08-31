@@ -1,9 +1,17 @@
 /// <reference lib="dom" />
-// Browser dev-host page entry for the counter example (real-Chromium E2E
-// lane, owned by e2e/ + harness/). Bundled by `deno bundle --platform
-// browser` (same mechanism .deps/polyengine/tools/release-bundle/build.ts
-// uses for the embedder release asset) into harness/dist/entry.js and
-// loaded by harness/index.html.
+// Browser dev-host page entry (real-Chromium E2E lane, owned by e2e/ +
+// harness/). Bundled by `deno bundle --platform browser` (same mechanism
+// .deps/polyengine/tools/release-bundle/build.ts uses for the embedder
+// release asset) into harness/dist/entry.js and loaded by
+// harness/index.html.
+//
+// Which example to mount is chosen via the page's `?app=` query param
+// (e.g. `?app=todomvc`); defaults to `counter`. The component is fetched
+// from `/${app}.component.wasm` (see e2e/server.ts's mapping). For
+// `todomvc` specifically, a `<link>` to harness/todomvc.css is injected —
+// examples/todomvc drops its `asset!`-based Stylesheet (needs the `dx`
+// CLI's asset pipeline; see examples/todomvc/src/lib.rs's header), so the
+// harness supplies the same stylesheet directly instead.
 //
 // Governing docs: host/tests/counter_test.ts (what the app does / how
 // mounting works in Deno — same mountApp API, real DOM here instead of
@@ -43,6 +51,14 @@ async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) throw new Error("harness/index.html must have <div id=app>");
 
+  const app = new URLSearchParams(location.search).get("app") ?? "counter";
+  if (app === "todomvc") {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = "./todomvc.css";
+    document.head.appendChild(link);
+  }
+
   // Build-identity probe (dispatch's mandatory rule: verify the served
   // build before trusting any probe). harness/build.ts writes this stamp
   // alongside dist/entry.js; the test asserts its gitRev against
@@ -56,7 +72,7 @@ async function main(): Promise<void> {
     // best-effort; absence just means the identity probe test fails loudly
   }
 
-  const res = await fetch("/counter.component.wasm");
+  const res = await fetch(`/${app}.component.wasm`);
   if (!res.ok) {
     throw new Error(`fetching component failed: ${res.status} ${res.statusText}`);
   }
@@ -86,7 +102,8 @@ async function main(): Promise<void> {
   //   - window.__e2eErrors: collected page/onError errors (asserted empty).
   (globalThis as unknown as { __mountedHandle: typeof mounted }).__mountedHandle = mounted;
 
-  await waitFor(() => root.querySelector("#count") !== null);
+  const mountedSelector = app === "todomvc" ? ".todoapp" : "#count";
+  await waitFor(() => root.querySelector(mountedSelector) !== null);
 
   (globalThis as unknown as { __mounted: boolean }).__mounted = true;
   const statusEl = document.getElementById("status");

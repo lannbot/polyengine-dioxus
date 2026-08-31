@@ -88,5 +88,8 @@ e2e:
     if [ ! -f examples/build/counter.component.wasm ]; then
       just example counter
     fi
+    if [ ! -f examples/build/todomvc.component.wasm ]; then
+      just example todomvc
+    fi
     deno run -A harness/build.ts
     cd e2e && npx playwright test
