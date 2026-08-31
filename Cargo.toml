@@ -44,13 +44,3 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = "debuginfo"
-
-# Replace dioxus-core's `subsecond` hot-patching dependency with an inert
-# stub. Upstream's wasm32 implementation pulls in js-sys/web-sys/wasm-bindgen,
-# whose `__wbindgen_describe_*` exports are GC roots and drag the
-# `__wbindgen_placeholder__` imports into the module — which `wasm-tools
-# component new` cannot bind to any WIT interface, so componentization fails.
-# Hot-patching cannot work in a polyengine component anyway (no fetch, no JS
-# glue). See stubs/subsecond/src/lib.rs for the full rationale.
-[patch.crates-io]
-subsecond = { path = "stubs/subsecond" }

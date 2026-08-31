@@ -36,30 +36,41 @@ check:
     cargo clippy --workspace --target wasm32-unknown-unknown -- -D warnings
     deno task check
 
+# Build the wbg-sever tool (standalone workspace: native, not wasm32 — see
+# tools/wbg-sever/Cargo.toml's `[workspace]`). Idempotent: cargo no-ops if the
+# binary is already up to date.
+sever-tool:
+    cargo build --release --manifest-path tools/wbg-sever/Cargo.toml
+
 test:
     cargo test
     deno task test
 
 # Build the surface-probe fixture component into fixtures/build/. The
 # full-stack host tests load it.
-fixtures:
+fixtures: sever-tool
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p fixtures/build
     cargo build -p surface-probe --target wasm32-unknown-unknown --release
-    wasm-tools component new \
+    ./tools/wbg-sever/target/release/wbg-sever \
       target/wasm32-unknown-unknown/release/surface_probe.wasm \
+      target/wasm32-unknown-unknown/release/surface_probe.severed.wasm
+    wasm-tools component new \
+      target/wasm32-unknown-unknown/release/surface_probe.severed.wasm \
       -o fixtures/build/surface-probe.component.wasm
     wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe.component.wasm
 
 # Build an example app component into examples/build/.
-example name:
+example name: sever-tool
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p examples/build
     cargo build -p {{name}}-example --target wasm32-unknown-unknown --release
+    module="target/wasm32-unknown-unknown/release/$(echo {{name}} | tr - _)_example.wasm"
+    ./tools/wbg-sever/target/release/wbg-sever "$module" "$module.severed.wasm"
     wasm-tools component new \
-      "target/wasm32-unknown-unknown/release/$(echo {{name}} | tr - _)_example.wasm" \
+      "$module.severed.wasm" \
       -o examples/build/{{name}}.component.wasm
     wasm-tools validate --features component-model,cm-async examples/build/{{name}}.component.wasm
 
