@@ -4,7 +4,7 @@
 //! segments are decoded together host-side: op operands reference dynamic
 //! string bytes by UTF-16 code-unit length, consumed sequentially from the
 //! string segment (itself one contiguous UTF-8 blob, decoded in a single
-//! `TextDecoder` pass). See `wit/world.wit`'s `surface` interface doc
+//! `TextDecoder` pass). See `wit/world.wit`'s `run` export doc
 //! comment for the normative format; this module must match it exactly.
 
 use std::collections::HashMap;

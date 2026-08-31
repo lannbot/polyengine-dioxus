@@ -1,6 +1,6 @@
 // Decoder for the polymorph:dioxus mutation wire format.
 //
-// The wire format is normative in wit/world.wit (interface `surface`, doc
+// The wire format is normative in wit/world.wit (the `run` export's doc
 // comments on the opcode table, framing, and primitive operand encodings).
 // This file implements the "op segment" decoder (decodeBatch) plus the
 // stream-transport framing layer (FrameDecoder). See wit/world.wit for the

@@ -3,22 +3,56 @@
 //!
 //! # Why the VirtualDom lives in a thread-local
 //!
-//! `run` and `handle-event` are two *separate* async export tasks in the same
-//! (single-threaded) component instance, and both need the VirtualDom: `run`
-//! to wait for and render scheduler work, `handle-event` to dispatch and then
-//! flush the render the handler just caused. `wit/world.wit` requires that
-//! flush to happen before `handle-event`'s completion is observable
-//! host-side, so `handle-event` cannot simply mark scopes dirty and hope the
-//! `run` task is polled first — it renders and flushes itself.
+//! The scheduler task `run` spawns and every `handle-event` export task live
+//! in the same (single-threaded) component instance, and both need the
+//! VirtualDom: the scheduler to wait for and render scheduler work,
+//! `handle-event` to dispatch and then flush the render the handler just
+//! caused. `wit/world.wit` requires that flush to happen before
+//! `handle-event`'s completion is observable host-side, so `handle-event`
+//! cannot simply mark scopes dirty and hope the scheduler task is polled
+//! first — it renders and flushes itself.
 //!
 //! That means neither task may hold a borrow of the VirtualDom across an
-//! await. `run`'s wait is therefore written as a `poll_fn` that constructs a
-//! fresh `wait_for_work()` future on every poll and drops the borrow before
-//! returning `Pending`. dioxus documents `wait_for_work` as cancel-safe
-//! ("you're fine to discard the future in a select block",
+//! await. The scheduler's wait is therefore written as a `poll_fn` that
+//! constructs a fresh `wait_for_work()` future on every poll and drops the
+//! borrow before returning `Pending`. dioxus documents `wait_for_work` as
+//! cancel-safe ("you're fine to discard the future in a select block",
 //! dioxus-core-0.7.10/src/virtual_dom.rs:433), which is exactly the property
 //! this needs: each poll re-drains the scheduler queue and re-registers the
 //! waker on the mpsc receiver.
+//!
+//! # Why `run` returns immediately and spawns the scheduler
+//!
+//! `run` is `async func() -> stream<u8>`: the host awaits its promise to
+//! obtain the read end, then parks a `readDirect` session on it. Under the
+//! component-model async ABI, an async export's Rust body *returning* is
+//! task.return followed by task exit — so the scheduler cannot live in
+//! `run`'s own body. Instead `run` creates the stream, stashes the writer
+//! half in `RENDERER`, `spawn_local`s the mount-and-serve task, and returns
+//! the reader. (Precedent for returning a stream while a spawned task pumps
+//! it: `.deps/polyengine/examples/guests/stream-echo/src/lib.rs`.)
+//!
+//! Ordering is safe by rendezvous: the spawned task's first `write` parks
+//! until the host actually reads, so nothing is lost if it runs before the
+//! host has its session parked. The converse would deadlock, which is why
+//! `run`'s own body must not write anything before returning the reader —
+//! that write would park while the host is still awaiting `run`'s promise
+//! for the reader it needs in order to read.
+//!
+//! All driver state (`RENDERER`/`RUNTIME`/`INTERNER`/`VDOM`) is installed
+//! before `run` returns, so a `handle-event` arriving immediately after the
+//! return finds consistent state. It cannot find a listener yet (no batch
+//! has been applied), but it will not observe an uninitialized cell.
+//!
+//! # How failure surfaces
+//!
+//! (Historical: an earlier revision passed the read end to a host import and
+//! `run`'s promise never settled, so a mount-time failure had nowhere to go
+//! but that held-open promise.) Now `run`'s promise settles as soon as the
+//! reader is handed back, and a trap in the spawned scheduler task surfaces
+//! as a rejection of the host's parked direct-read session
+//! (`PeerTrappedError`) — the channel the host actually watches. A trap
+//! during `run`'s own body rejects the host's `await exports.run()`.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -29,14 +63,18 @@ use std::task::Context;
 use dioxus_core::{ElementId, Element, Event, Runtime, VirtualDom};
 use dioxus_core_types::event_bubbles;
 use dioxus_html::PlatformEventData;
-use wit_bindgen::rt::async_support::StreamWriter;
+use wit_bindgen::rt::async_support::{spawn_local, StreamReader, StreamWriter};
 
 use crate::bindings::polymorph::dioxus::events::Payload;
-use crate::bindings::polymorph::dioxus::surface;
 use crate::bindings::{wit_stream, DomEvent};
 use crate::events::{WitEventConverter, WitEventData};
 use crate::protocol::Interner;
 use crate::writer::MutationWriter;
+
+/// The read end of the mutation channel: what `run` hands back to the host.
+/// Named here so [`crate::launch!`] can spell the export's return type
+/// without the app crate naming wit-bindgen's runtime module.
+pub type MutationStream = StreamReader<u8>;
 
 /// Everything the flush path needs, shared by the `run` loop and by
 /// `handle-event`.
@@ -121,8 +159,9 @@ async fn flush() {
                 // means the read end is gone, not a short write to retry.
                 let leftover = w.write_all(bytes).await;
                 if !leftover.is_empty() {
-                    // The host dropped the read end: the surface is gone and
-                    // there is nothing useful left to do with this writer.
+                    // The host dropped the read end: the mutation channel is
+                    // gone and there is nothing useful left to do with this
+                    // writer.
                     // Mark the renderer dead and drop whatever was staged so
                     // far — only reachable at host teardown, and bounded
                     // memory beats a slow leak from `pending` growing on
@@ -170,11 +209,12 @@ fn wait_for_work() -> impl Future<Output = ()> {
 
 /// Implementation of the world's `run` export.
 ///
-/// Installs the event converter, builds the VirtualDom, opens the mutation
-/// stream, mounts the app (`rebuild` → one batch), then serves the
-/// scheduler forever. `run`'s future never resolves in normal operation, as
-/// documented in `wit/world.wit`.
-pub async fn run(root: fn() -> Element) {
+/// Installs the event converter, builds the VirtualDom, creates the mutation
+/// stream, spawns the mount-and-serve task (`rebuild` → one batch, then the
+/// scheduler forever), and returns the stream's read end to the host. See
+/// the module doc for why the scheduler must be a spawned task and why
+/// nothing is written before the return.
+pub async fn run(root: fn() -> Element) -> MutationStream {
     // dioxus-html's converter slot is global and write-once per process; a
     // component instance is a fresh process image, so this runs exactly once.
     dioxus_html::set_event_converter(Box::new(WitEventConverter));
@@ -186,10 +226,9 @@ pub async fn run(root: fn() -> Element) {
     VDOM.set(Some(dom));
 
     let (writer, reader) = wit_stream::new();
-    // Hand the read end over *before* the first batch, per `wit/world.wit`;
-    // the host parks a direct-read session on it.
-    surface::open(reader).await;
 
+    // Installed before returning, so a `handle-event` racing the host's very
+    // first read finds initialized state rather than tripping an `expect`.
     RENDERER.set(Some(Renderer {
         writer: MutationWriter::new(interner),
         stream: Some(writer),
@@ -198,25 +237,23 @@ pub async fn run(root: fn() -> Element) {
         dead: false,
     }));
 
-    render(|dom, w| dom.rebuild(w));
-    flush().await;
-
-    // The persistent scheduler loop's park (`wait_for_work`: a plain Rust
-    // future woken cross-task, no WIT waitable) is legal because the host
-    // retains a parked direct-read session on our ops stream — amendment
-    // A15 host retention, so a quiescent instance is the documented
-    // embedder-may-act state. (Historical note: an earlier revision of this
-    // crate also supported a synchronous `flush`-per-batch transport with
-    // no host-retained handle to park against, so `run` had to return right
-    // after the mount for that transport instead of entering this loop.
-    // That transport was retired — see `wit/world.wit`'s `surface` doc and
-    // `bench/README.md`'s A/B — and `run` now unconditionally serves the
-    // scheduler forever.)
-    loop {
-        wait_for_work().await;
-        render(|dom, w| dom.render_immediate(w));
+    spawn_local(async move {
+        render(|dom, w| dom.rebuild(w));
         flush().await;
-    }
+
+        // The persistent scheduler loop's park (`wait_for_work`: a plain Rust
+        // future woken cross-task, no WIT waitable) is legal because the host
+        // retains a parked direct-read session on our ops stream — amendment
+        // A15 host retention, so a quiescent instance is the documented
+        // embedder-may-act state.
+        loop {
+            wait_for_work().await;
+            render(|dom, w| dom.render_immediate(w));
+            flush().await;
+        }
+    });
+
+    reader
 }
 
 /// Run one render step with both thread-locals borrowed, and nothing awaited
@@ -286,7 +323,7 @@ macro_rules! launch {
         struct __PolyengineDioxusApp;
 
         impl $crate::bindings::Guest for __PolyengineDioxusApp {
-            async fn run() {
+            async fn run() -> $crate::driver::MutationStream {
                 $crate::driver::run($root).await
             }
 

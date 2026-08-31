@@ -1,7 +1,7 @@
 // Host runtime wiring for polymorph:dioxus — instantiation, the stream
 // mutation transport, and DOM event dispatch back into the guest.
 //
-// Governing docs: wit/world.wit (world `app`, interface `surface`), and
+// Governing docs: wit/world.wit (world `app`, interface `events`), and
 // .deps/polyengine/contracts/embedder-api.md ("Module wiring and
 // instantiation", "Resources", "Streams and futures" amendment A21, "Value
 // mapping"). Cited inline as `contract:<section>`.
@@ -22,9 +22,11 @@ export interface MountOptions {
    * artifacts" A3). Typed `unknown` here per the dispatch's contract. */
   translator: unknown;
   root: Element;
-  /** run-task rejection, or a stream session failure (stream transport
-   * only) — surfaces asynchronously since `run`'s promise is held open,
-   * never awaited (wit: "its promise never settles in normal operation"). */
+  /** Asynchronous failure after a successful mount: the mutation stream's
+   * parked direct-read session rejecting (guest trap — `PeerTrappedError` —
+   * or teardown), or a `handle-event` call rejecting. A failure during mount
+   * itself is NOT routed here: `await exports.run()` rejects and `mountApp`
+   * throws it to the caller. */
   onError?: (err: unknown) => void;
 }
 
@@ -47,7 +49,7 @@ export interface Mounted {
 }
 
 /**
- * A host-implemented resource class for `surface.dom-event`
+ * A host-implemented resource class for `events.dom-event`
  * (contracts/embedder-api.md "Resources": "the host provides a plain class
  * implementing the bindgen-emitted interface"). Constructed per dispatched
  * event and passed as the `ev: borrow<dom-event>` argument to
@@ -81,11 +83,18 @@ class DomEvent {
 /** Mount a polymorph:dioxus app component into `opts.root`.
  *
  * Builds a `DomApplier` over the root (with an `EventDispatcher` as its
- * `ListenerDelegate`), instantiates the component with the `surface`
+ * `ListenerDelegate`), instantiates the component with the `events`
  * imports wired per contracts/embedder-api.md "Module wiring and
- * instantiation" (imports keyed by the verbatim interface id), starts
- * `run()` (holding its never-settling promise open), and returns a handle
- * for dispatching DOM events and (best-effort) tearing down.
+ * instantiation" (imports keyed by the verbatim interface id), awaits
+ * `run()` for the mutation stream's read end, and parks a direct-read
+ * session on it for the life of the instance. Returns a handle for
+ * dispatching DOM events and (best-effort) tearing down.
+ *
+ * Because the read end now comes back as `run`'s return value rather than
+ * through a host import, a mount-time guest trap rejects THIS await and is
+ * thrown from `mountApp` — an improvement over the previous shape, where
+ * `run`'s promise was held open and a mount failure could only surface
+ * asynchronously through `onError`.
  */
 export async function mountApp(opts: MountOptions): Promise<Mounted> {
   const dispatcher = new EventDispatcher(opts.root, (elementId, nameId, name, ev) => {
@@ -157,35 +166,12 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   }
 
   const imports = {
-    "polymorph:dioxus/surface@0.1.0": {
-      // Stream transport: park a direct-read session for the instance's
-      // lifetime. We always consume the FULL view per rendezvous — whole
-      // frames decoded+applied, any partial tail staged in the
-      // FrameDecoder — so `readDirect`'s "never acknowledge zero bytes"
-      // hazard (embedder-api.md amendment A21) never arises: `markRead`
-      // always receives `view.length`, never 0.
-      open: async (stream: Stream<Uint8Array>): Promise<void> => {
-        const consume = (src: DirectSource): "more" | "done" => {
-          const view = src.remaining();
-          const n = frameDecoder.feed(view);
-          if (n < view.length) {
-            frameDecoder.stashRest(view, n);
-          }
-          // The callback runs DOM application only (decodeBatch via the
-          // FrameDecoder) — it never calls back into guest code, honoring
-          // the A21 reentrancy rule ("calls that can run guest code ...
-          // are forbidden" inside a direct-read callback).
-          src.markRead(view.length);
-          return "more";
-        };
-        // Hold the session; it only settles on stream end/drop/fault,
-        // which for a healthy long-lived `run()` task never happens in
-        // normal operation. Route a rejection (peer trap, teardown) to
-        // onError rather than letting it become unhandled.
-        stream.readDirect(consume).catch(onError);
-      },
-      DomEvent,
-    },
+    // The world imports only `events`, whose sole host-implemented item is
+    // the `dom-event` resource. Keyed by the verbatim interface id
+    // (contract:"Module wiring and instantiation"); the resource class is
+    // named by its bindgen-emitted UpperCamel name
+    // (contract:"Resources").
+    "polymorph:dioxus/events@0.1.0": { DomEvent },
   };
 
   const instance = await instantiate(
@@ -195,11 +181,34 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
 
   handleEventExport = instance.exports.handleEvent as (...a: unknown[]) => unknown;
 
-  // `run` is a long-lived task (wit: "its promise never settles in normal
-  // operation" — it opens the channel, mounts, then serves the scheduler
-  // forever). We intentionally do not await it; hold the promise so a
-  // rejection is observable via onError instead of an unhandled rejection.
-  Promise.resolve(instance.exports.run()).catch((err: unknown) => {
+  // `run` starts the app and returns the mutation channel's read end; its
+  // promise settles as soon as the guest hands the reader back (the app's
+  // scheduler keeps running as a spawned guest task). A trap before the
+  // return rejects here and propagates out of `mountApp`.
+  const ops = await (instance.exports.run as () => Promise<Stream<Uint8Array>>)();
+
+  // Park a direct-read session for the instance's lifetime. We always consume
+  // the FULL view per rendezvous — whole frames decoded+applied, any partial
+  // tail staged in the FrameDecoder — so `readDirect`'s "never acknowledge
+  // zero bytes" hazard (embedder-api.md amendment A21) never arises:
+  // `markRead` always receives `view.length`, never 0.
+  const consume = (src: DirectSource): "more" | "done" => {
+    const view = src.remaining();
+    const n = frameDecoder.feed(view);
+    if (n < view.length) {
+      frameDecoder.stashRest(view, n);
+    }
+    // The callback runs DOM application only (decodeBatch via the
+    // FrameDecoder) — it never calls back into guest code, honoring the A21
+    // reentrancy rule ("calls that can run guest code ... are forbidden"
+    // inside a direct-read callback).
+    src.markRead(view.length);
+    return "more";
+  };
+  // The session only settles on stream end/drop/fault, which for a healthy
+  // long-lived app never happens in normal operation. Route a rejection (peer
+  // trap, teardown) to onError rather than letting it become unhandled.
+  ops.readDirect(consume).catch((err: unknown) => {
     if (!disposed) onError(err);
   });
 

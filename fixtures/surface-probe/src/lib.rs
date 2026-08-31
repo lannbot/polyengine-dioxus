@@ -46,7 +46,7 @@ wit_bindgen::generate!({
 });
 
 use core::cell::RefCell;
-use polymorph::dioxus::surface::{self, DomEvent as HostDomEvent};
+use polymorph::dioxus::events::DomEvent as HostDomEvent;
 
 // -- wire encoding ------------------------------------------------------------
 //
@@ -313,53 +313,51 @@ fn build_event_batch(name: u16, payload: &Payload) -> (Vec<u8>, String, bool) {
     (ops, strings, prevent)
 }
 
-// The stream transport's writer half, stashed between `run`'s initial write
-// and every later `handle-event` write (dispatch: "stash the writer half ...
+// The stream transport's writer half. `run` creates it and parks it here;
+// the spawned initial-batch task and every later `handle-event` write take
+// it out and put it back (dispatch: "stash the writer half ...
 // in a thread_local RefCell; writes complete inline while the host session
 // is parked, so no cross-task interleaving. Do not hold RefCell borrows
 // across awaits." — every use below `take()`s the writer out of the cell
 // before awaiting, and puts it back after, so no borrow spans an `.await`).
+// Keeping it here is also what holds the stream OPEN: dropping this writer
+// is what would signal end-of-stream to the host, so it is never dropped.
 thread_local! {
     static WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<u8>>> = const { RefCell::new(None) };
-}
-
-// `run`'s permanent park (wit: "serve the Dioxus scheduler forever" — its
-// promise never settles in normal operation). A bare `core::future::pending()`
-// is NOT a legal way to park under the component-model-async callback ABI:
-// it registers no waitable at all, and wit-bindgen's own generated shim hits
-// an internal `unreachable!()` when a task polls Pending with nothing
-// waitable armed. A genuinely parked `StreamReader::next()` on a spare
-// never-written, never-dropped stream registers a REAL waitable (a stream
-// read), so the task legitimately hangs — the documented "embedder may
-// still act" park, never a trap. The writer half is stashed forever (never
-// taken back out, so never dropped): dropping an unwritten stream writer is
-// legal per the CABI (unlike `future`'s A8 write-before-drop obligation),
-// but we don't even want the reader to observe end-of-stream.
-thread_local! {
-    static PARK_WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<u8>>> = const { RefCell::new(None) };
 }
 
 struct Component;
 
 impl Guest for Component {
-    async fn run() {
-        let (ops, strings) = build_initial_batch();
-
-        // Guest creates the stream and hands the host the read end
-        // ONCE, before the first batch (wit: "Called at most once,
-        // before the first batch is written").
-        let (mut writer, reader) = wit_stream::new::<u8>();
-        surface::open(reader).await;
-        let frame = wire::frame(&ops, &strings);
-        writer.write_all(frame).await;
+    async fn run() -> wit_bindgen::rt::async_support::StreamReader<u8> {
+        // Create the channel and hand the read end back as `run`'s return
+        // value (wit: `export run: async func() -> stream<u8>`). Nothing is
+        // written from this body: a write here would park waiting for a
+        // reader the host cannot have until this promise settles.
+        let (writer, reader) = wit_stream::new::<u8>();
         WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 
-        // wit: "then serve the Dioxus scheduler forever" — this probe has
-        // no scheduler; park via a genuine waitable (see PARK_WRITER doc).
-        let (park_writer, mut park_reader) = wit_stream::new::<u8>();
-        PARK_WRITER.with(|cell| *cell.borrow_mut() = Some(park_writer));
-        park_reader.next().await;
-        unreachable!("PARK_WRITER is held forever and never written/dropped");
+        // The initial batch goes out from a spawned task, after the return.
+        // Rendezvous semantics make the ordering safe: the write parks until
+        // the host's `readDirect` session is parked, so it cannot be lost by
+        // racing ahead of the host.
+        wit_bindgen::rt::async_support::spawn_local(async move {
+            let (ops, strings) = build_initial_batch();
+            let frame = wire::frame(&ops, &strings);
+            let mut writer = WRITER
+                .with(|cell| cell.borrow_mut().take())
+                .expect("initial batch: writer taken before the first write");
+            writer.write_all(frame).await;
+            WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
+        });
+        // This task ends here; the spawned task ends once the initial batch
+        // is delivered. Neither closes the stream, because the WRITER half is
+        // put back into the thread_local rather than dropped — it stays alive
+        // there for `handle-event`, and the stream is open exactly as long as
+        // it is. (The old park-forever spare-stream hack this fixture used to
+        // keep `run` alive is gone with the return-the-stream contract.)
+
+        reader
     }
 
     async fn handle_event(_target: u32, name: u16, payload: Payload, ev: &HostDomEvent) {

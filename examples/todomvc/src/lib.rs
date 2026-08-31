@@ -14,6 +14,10 @@
 //!   2. Replaced `fn main() { dioxus::launch(app); }` with
 //!      `polyengine_dioxus::launch!(app);` (this is a `cdylib` lib crate
 //!      exporting a Wasm Component, not a native binary with a `main`).
+//!   3. `toggle_all` iterates `todos.write().values_mut()` instead of
+//!      upstream's `for (_, item) in todos.write().iter_mut()` — semantics
+//!      identical; this workspace builds with `clippy -D warnings`, which
+//!      rejects the original as `for_kv_map`.
 //!
 //! No other changes: components, names, and structure are untouched so this
 //! keeps proving the *real* example runs on this renderer.
@@ -69,7 +73,7 @@ fn app() -> Element {
     // If all todos are checked, uncheck them all. If any are unchecked, check them all.
     let toggle_all = move |_| {
         let check = active_todo_count() != 0;
-        for (_, item) in todos.write().iter_mut() {
+        for item in todos.write().values_mut() {
             item.checked = check;
         }
     };
