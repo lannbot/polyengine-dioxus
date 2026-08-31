@@ -7,3 +7,6 @@ dist/
 .deps/
 # Deno/npm lockfiles are committed; caches are not.
 .playwright/
+# Playwright's own run-artifact dirs (e2e/).
+test-results/
+playwright-report/

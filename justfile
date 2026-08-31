@@ -73,3 +73,14 @@ example name:
 vectors:
     cargo test --test vectors -- --ignored generate
     deno task test
+
+# Real-browser (Chromium via Playwright) E2E lane for the counter example.
+# First run: `cd e2e && npm install && npx playwright install chromium --with-deps`.
+e2e:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f examples/build/counter.component.wasm ]; then
+      just example counter
+    fi
+    deno run -A harness/build.ts
+    cd e2e && npx playwright test

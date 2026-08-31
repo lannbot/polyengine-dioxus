@@ -209,6 +209,22 @@ pub async fn run(root: fn() -> Element, transport: Transport) {
     render(|dom, w| dom.rebuild(w));
     flush().await;
 
+    // The persistent scheduler loop exists only under the stream transport.
+    // Its park (wait_for_work: a plain Rust future woken cross-task, no WIT
+    // waitable) is legal there because the host retains a parked direct-read
+    // session on our ops stream — amendment A15 host retention, so a
+    // quiescent instance is the documented embedder-may-act state. The call
+    // transport retains NOTHING host-side once flush returns, so the same
+    // park is indistinguishable from a deadlock and polyengine (correctly)
+    // traps it. Call-transport `run` therefore returns after the mount:
+    // handle-event renders and flushes itself, and its render_immediate →
+    // process_events still polls tasks dirtied in between, so events keep
+    // working — but background async work cannot wake the instance between
+    // events. Documented degradation of the bench/debug transport.
+    if matches!(transport, Transport::Call) {
+        return;
+    }
+
     loop {
         wait_for_work().await;
         render(|dom, w| dom.render_immediate(w));

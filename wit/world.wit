@@ -278,7 +278,13 @@ world app {
   import surface;
 
   /// Start the app: open the mutation channel, perform the initial mount
-  /// (rebuild → one batch), then serve the Dioxus scheduler forever.
+  /// (rebuild → one batch), then serve the Dioxus scheduler forever — under
+  /// the stream transport, whose host-parked read session makes the
+  /// quiescent park legal (embedder-api amendment A15 host retention).
+  /// Under the call transport there is no host-retained handle to park
+  /// against, so `run` returns after the mount and event handling drives
+  /// all further rendering; background async work cannot wake the instance
+  /// between events (documented degradation of the bench/debug transport).
   export run: async func();
 
   /// Dispatch one DOM event to the listener registered on `target` (the

@@ -187,7 +187,24 @@ function formValues(target: EventTarget | null | undefined): [string, string[]][
 }
 
 function formData(name: string, ev: NativeEventLike) {
-  const target = (ev.currentTarget ?? ev.target) as
+  // CONTRACT (browser-compat fix, flagged in the E2E track report): prefer
+  // `target` over `currentTarget`. Native DOM semantics: `target` is the
+  // element the event actually originated on and stays fixed throughout
+  // bubbling; `currentTarget` is whichever element the *currently
+  // executing* listener happens to be attached to — for our delegated
+  // model (EventDispatcher.add: bubbling listeners are attached to
+  // `root`, not to the control itself — host/src/events.ts "add()"), that
+  // means `currentTarget` is the delegation ROOT, not the input/select/
+  // form control whose `.value`/`.checked` we need. Every existing test
+  // (host/tests/counter_test.ts, events_test.ts) synthesizes bare
+  // `{type, value}` events with neither field set, so it never exercised
+  // this path — real Chromium's native bubbling delegation is what
+  // exposed it (e2e/tests/counter.spec.ts's real-keyboard-typing
+  // assertion silently got value="" via `currentTarget` = the root div,
+  // which has no `.value`). `formValues` below already had the correct
+  // target-first order; this brings the sibling `target` const in line
+  // with it.
+  const target = (ev.target ?? ev.currentTarget) as
     | (EventTarget & { value?: string; checked?: boolean; type?: string })
     | null
     | undefined;
@@ -210,7 +227,13 @@ function formData(name: string, ev: NativeEventLike) {
 }
 
 function scrollData(ev: NativeEventLike) {
-  const t = (ev.currentTarget ?? ev.target) as
+  // Same target-vs-currentTarget fix as formData above: scroll doesn't
+  // bubble (so today `add()` attaches its listener directly to the
+  // element in question and `target`/`currentTarget` coincide in
+  // practice) but preferring `target` keeps this consistent with
+  // formData's now-corrected precedence rather than leaving a footgun
+  // for any future non-bubbling-assumption change.
+  const t = (ev.target ?? ev.currentTarget) as
     | {
       scrollTop?: number;
       scrollLeft?: number;
