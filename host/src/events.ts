@@ -79,11 +79,30 @@ const MOUSE_EVENTS = new Set([
 ]);
 
 const KEYBOARD_EVENTS = new Set(["keydown", "keyup", "keypress"]);
-const FORM_EVENTS = new Set(["input", "change", "submit"]);
-const SCROLL_EVENTS = new Set(["scroll"]);
+// dioxus-html-0.7.10 generated.rs Form(FormData) events= list includes
+// `onreset => reset` alongside input/change/submit.
+const FORM_EVENTS = new Set(["input", "change", "submit", "reset"]);
+// dioxus-html-0.7.10 generated.rs Scroll(ScrollData) events= list includes
+// `onscrollend => scrollend` alongside scroll.
+const SCROLL_EVENTS = new Set(["scroll", "scrollend"]);
+
+// dioxus-html-0.7.10 generated.rs Pointer(PointerData) events= list includes
+// gotpointercapture, lostpointercapture, and (per this version) auxclick —
+// CONTRACT: the dispatch that scoped this fix said auxclick maps to the
+// mouse family, but the vendored authority
+// (~/.cargo/registry/.../dioxus-html-0.7.10/src/events/generated.rs:271,
+// inside the `Pointer(PointerData)` block, not `Mouse(MouseData)`) lists
+// `onauxclick => auxclick` under Pointer. Following the authority file over
+// the dispatch summary per the conservative-reading rule; flagged in the
+// final report.
+const EXTRA_POINTER_EVENTS = new Set([
+  "gotpointercapture",
+  "lostpointercapture",
+  "auxclick",
+]);
 
 function isPointerEvent(name: string): boolean {
-  return name.startsWith("pointer");
+  return name.startsWith("pointer") || EXTRA_POINTER_EVENTS.has(name);
 }
 
 function num(v: number | undefined, fallback = 0): number {

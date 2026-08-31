@@ -127,7 +127,16 @@ package polymorph:dioxus@0.1.0;
 ///          0x04 none   (remove the attribute unconditionally — routed via
 ///                       removeAttribute/removeAttributeNS/style.removeProperty
 ///                       as the name/namespace dictates; the boolean-attribute
-///                       truthiness table governs only text/bool VALUES)
+///                       truthiness table governs only text/bool VALUES.
+///                       Property-backed fields get the same reset the
+///                       truthy-value path uses instead of a bare
+///                       removeAttribute, since removeAttribute alone does not
+///                       clear a live element's property: value -> "" (+
+///                       removeAttribute), checked -> false, selected ->
+///                       false, dangerous_inner_html -> innerHTML = "".
+///                       Ported from dioxus v0.7.10's `remove_attribute`
+///                       sledgehammer op in
+///                       packages/interpreter/src/unified_bindings.rs.)
 ///        The host applies Dioxus's attribute semantics (value/checked/
 ///        selected as properties, style namespace via style object,
 ///        dangerous_inner_html, boolean attribute removal on false).

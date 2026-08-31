@@ -117,12 +117,23 @@ impl MutationWriter {
     }
 
     /// Return the id for `template`, registering it on first encounter.
+    ///
+    /// Panics if more than `u16::MAX` distinct templates are registered
+    /// (mirrors [`Interner::intern`]'s id-space guard in protocol.rs).
     fn template_id(&mut self, template: Template) -> u16 {
         if let Some(&id) = self.templates.get(&template) {
             return id;
         }
-        let id = self.templates.len() as u16;
+        let next = self.templates.len();
+        assert!(
+            next < u16::MAX as usize,
+            "writer: registered more than {} distinct templates; template id \
+             space (u16) exhausted",
+            u16::MAX
+        );
+        let id = next as u16;
         self.templates.insert(template, id);
+
 
         for root in template.roots.iter() {
             self.intern_template_node(root);

@@ -196,6 +196,43 @@ Deno.test("attribute semantics: class, checked, value, style ns, boolean removal
   void document;
 });
 
+// Advisory: removeAttribute("value") alone does not reset a live input's
+// `.value` property (removeAttribute only affects the reflected attribute,
+// not the property once the user/host has diverged it) — setAttributeNone
+// must special-case property-backed fields the same way the truthy path
+// does. Ported from dioxus v0.7.10's `remove_attribute` sledgehammer op
+// (packages/interpreter/src/unified_bindings.rs); see wit/world.wit's
+// attrval `none` doc comment.
+Deno.test("setAttributeNone(\"value\") clears a live input's .value property, not just the attribute", () => {
+  const { root } = makeRoot();
+  const { delegate } = recordingDelegate();
+  const applier = new DomApplier(root, delegate);
+
+  applier.cacheString(0, "input");
+  applier.cacheString(1, "value");
+
+  const tmplRoots: TemplateNodeDesc[] = [
+    { kind: "element", tag: 0, ns: null, attrs: [], children: [] },
+  ];
+  applier.registerTemplate(0, tmplRoots);
+  applier.loadTemplate(0, 0, 2);
+  applier.appendChildren(0, 1);
+
+  const input = root.firstElementChild! as unknown as HTMLInputElement;
+
+  // Simulate the host setting an initial value, then the user typing into
+  // the field (a plain property write, same as what a real `input` event
+  // would leave behind — removeAttribute("value") never touches this).
+  applier.setAttributeText(2, 1, null, "initial");
+  input.value = "user typed this";
+  assertEquals(input.value, "user typed this");
+
+  applier.setAttributeNone(2, 1, null);
+
+  assertEquals(input.value, "", "setAttributeNone(value) must reset the live .value property");
+  assertEquals(input.hasAttribute("value"), false);
+});
+
 Deno.test("listener delegate recording for add/remove with resolved names", () => {
   const { root } = makeRoot();
   const { events, delegate } = recordingDelegate();

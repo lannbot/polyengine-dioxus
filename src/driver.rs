@@ -63,6 +63,13 @@ struct Renderer {
     pending: Vec<u8>,
     /// Reused frame scratch buffer (`Batch::take_frame` appends).
     scratch: Vec<u8>,
+    /// Set once the host has dropped the read end of the stream transport
+    /// (see the reader-gone branch in [`flush`]). Once dead, `flush` drops
+    /// staged/incoming batches instead of accumulating them in `pending`:
+    /// this is only reachable at host teardown, when there is no longer a
+    /// reader to receive anything, so bounded memory beats a slow leak from
+    /// unboundedly growing `pending` across further flushes.
+    dead: bool,
 }
 
 thread_local! {
@@ -101,6 +108,13 @@ async fn flush() {
         if r.writer.batch.is_empty() {
             return Action::Nothing;
         }
+        if r.dead {
+            // The reader is gone; drop this batch instead of staging it into
+            // `pending` (which would otherwise grow unboundedly across every
+            // future flush once the host has torn down its read end).
+            r.writer.batch.take_segments();
+            return Action::Nothing;
+        }
         match r.transport {
             Transport::Call => {
                 let (ops, strings) = r.writer.batch.take_segments();
@@ -132,8 +146,15 @@ async fn flush() {
                 if !leftover.is_empty() {
                     // The host dropped the read end: the surface is gone and
                     // there is nothing useful left to do with this writer.
-                    // Leave `stream` as `None` so later flushes stage into
-                    // `pending` harmlessly rather than trapping.
+                    // Mark the renderer dead and drop whatever was staged so
+                    // far — only reachable at host teardown, and bounded
+                    // memory beats a slow leak from `pending` growing on
+                    // every subsequent flush with no reader left to drain it.
+                    RENDERER.with_borrow_mut(|r| {
+                        let r = r.as_mut().unwrap();
+                        r.dead = true;
+                        r.pending.clear();
+                    });
                     return;
                 }
                 // Anything another task staged while we were awaiting goes out
@@ -204,6 +225,7 @@ pub async fn run(root: fn() -> Element, transport: Transport) {
         stream,
         pending: Vec::new(),
         scratch: Vec::new(),
+        dead: false,
     }));
 
     render(|dom, w| dom.rebuild(w));

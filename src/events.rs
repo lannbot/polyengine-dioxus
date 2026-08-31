@@ -490,9 +490,13 @@ impl HasFileData for Empty {
     }
 }
 
-/// Drag events carry a mouse snapshot on the wire (the host maps them to the
-/// `mouse` arm), so the drag family reuses [`Mouse`] for its positional half
-/// and supplies empty file/data-transfer halves.
+/// Drag events are NOT currently mapped to the `mouse` family by the host —
+/// host/src/events.ts dispatches all `drag*` names to `{ kind: "empty" }`,
+/// and the WIT payload variant list has no `drag` arm at all in this
+/// version. This struct exists for forward-compat: if/when the host gains
+/// drag support and starts sending a mouse-shaped snapshot for drag events,
+/// this reuses [`Mouse`] for the positional half and supplies empty
+/// file/data-transfer halves. Until then it is unreachable from real events.
 struct Drag(wit::MouseData);
 
 impl InteractionLocation for Drag {

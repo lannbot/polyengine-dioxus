@@ -374,19 +374,41 @@ export class DomApplier implements OpSink {
     const el = this.#getNode(id) as Element;
     const nsStr = this.#strOpt(ns);
     const field = this.#str(name);
-    // wit: attrval none = "remove the attribute". Style-namespace and
-    // namespaced attrs go through their own removal path; the default path
-    // removes via removeAttribute regardless of the bool-attr table (an
-    // explicit "none" always means remove, unlike the falsy-string path).
+    // wit: attrval none = "remove the attribute". Ported verbatim from the
+    // `remove_attribute` sledgehammer op body (authority:
+    // dioxus v0.7.10 packages/interpreter/src/unified_bindings.rs, the
+    // `fn remove_attribute(id, field, ns)` case in `mod js`). That body
+    // special-cases property-backed fields under the no-namespace arm before
+    // falling back to plain `removeAttribute` — removeAttribute alone does
+    // NOT reset a live input's `.value`/`.checked`/`.selected`/innerHTML
+    // properties, so an explicit `None` must go through the same property
+    // resets `setAttributeInner`'s truthy path uses, or a `value: None` after
+    // a user has typed into the input silently fails to clear it.
+    if (!nsStr) {
+      switch (field) {
+        case "value":
+          (el as unknown as HTMLInputElement).value = "";
+          el.removeAttribute("value");
+          return;
+        case "checked":
+          (el as unknown as HTMLInputElement).checked = false;
+          return;
+        case "selected":
+          (el as unknown as HTMLOptionElement).selected = false;
+          return;
+        case "dangerous_inner_html":
+          el.innerHTML = "";
+          return;
+        default:
+          el.removeAttribute(field);
+          return;
+      }
+    }
     if (nsStr === NS_STYLE) {
       (el as unknown as HTMLElement).style.removeProperty(field);
       return;
     }
-    if (nsStr) {
-      el.removeAttributeNS(nsStr, field);
-      return;
-    }
-    el.removeAttribute(field);
+    el.removeAttributeNS(nsStr, field);
   }
 
   setText(id: number, text: string): void {

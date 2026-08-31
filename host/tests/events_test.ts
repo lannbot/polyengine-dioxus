@@ -308,3 +308,16 @@ Deno.test("serializePayload: unmapped event names dispatch as empty", () => {
   assertEquals(serializePayload("resize", { type: "resize" }), { kind: "empty" });
   assertEquals(serializePayload("visible", { type: "visible" }), { kind: "empty" });
 });
+
+// dioxus-html-0.7.10 generated.rs name->data-type mapping: reset->Form,
+// scrollend->Scroll, gotpointercapture/lostpointercapture/auxclick->Pointer
+// (auxclick per the authority file, not the mouse family — see the
+// CONTRACT comment on EXTRA_POINTER_EVENTS in src/events.ts).
+Deno.test("serializePayload: previously-misclassified names map to their real family", () => {
+  const kindOf = (name: string) => (serializePayload(name, { type: name }) as { kind: string }).kind;
+  assertEquals(kindOf("reset"), "form");
+  assertEquals(kindOf("scrollend"), "scroll");
+  assertEquals(kindOf("gotpointercapture"), "pointer");
+  assertEquals(kindOf("lostpointercapture"), "pointer");
+  assertEquals(kindOf("auxclick"), "pointer");
+});
