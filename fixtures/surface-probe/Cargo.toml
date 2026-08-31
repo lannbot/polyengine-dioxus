@@ -7,12 +7,5 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
-[features]
-# Default transport is the stream (open + readDirect on the host side);
-# `call-transport` builds the same probe over the flush(list<u8>, string)
-# import instead, so the host transport tests cover both.
-default = []
-call-transport = []
-
 [dependencies]
 wit-bindgen = { version = "=0.60.0", features = ["async-spawn"] }

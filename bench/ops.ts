@@ -1,7 +1,7 @@
 // bench/ops.ts — shared operation definitions and mount/dispatch/poll
-// helpers for bench-rows, used by both bench_worker.ts (runs one
-// op x transport pair in its own Deno process) and bench.ts (the parent
-// that spawns workers and aggregates).
+// helpers for bench-rows, used by both bench_worker.ts (runs one op in its
+// own Deno process) and bench.ts (the parent that spawns workers and
+// aggregates).
 //
 // Governing mount/dispatch pattern: host/src/host.ts + host/tests/
 // counter_test.ts. Methodology and per-rep state discipline:
@@ -31,8 +31,8 @@ export const RUNS = 5;
 // (dispatch: "an unexplainable number is a bug lead, not a result").
 export const SANITY_FLOOR_MS = 0.5;
 
-export type TransportName = "stream" | "call";
-export const TRANSPORTS: TransportName[] = ["stream", "call"];
+export type TransportName = "stream";
+export const TRANSPORTS: TransportName[] = ["stream"];
 
 export function componentPath(t: TransportName): string {
   return new URL(`./build/bench-rows-${t}.component.wasm`, import.meta.url).pathname;
@@ -44,7 +44,7 @@ export async function loadComponentBytes(t: TransportName): Promise<Uint8Array> 
     return await Deno.readFile(path);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) {
-      throw new Error(`component not found at ${path}. Run bench/run.sh (it builds both variants first).`);
+      throw new Error(`component not found at ${path}. Run bench/run.sh (it builds it first).`);
     }
     throw e;
   }

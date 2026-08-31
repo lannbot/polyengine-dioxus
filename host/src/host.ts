@@ -1,5 +1,5 @@
-// Host runtime wiring for polymorph:dioxus — instantiation, both mutation
-// transports, and DOM event dispatch back into the guest.
+// Host runtime wiring for polymorph:dioxus — instantiation, the stream
+// mutation transport, and DOM event dispatch back into the guest.
 //
 // Governing docs: wit/world.wit (world `app`, interface `surface`), and
 // .deps/polyengine/contracts/embedder-api.md ("Module wiring and
@@ -11,7 +11,7 @@ import type { Translator } from "@deltic/runtime/shim";
 import type { DirectSource, Stream } from "@deltic/protocol";
 
 import { DomApplier } from "./applier.ts";
-import { FrameDecoder, decodeBatch } from "./decoder.ts";
+import { FrameDecoder } from "./decoder.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
 
@@ -30,13 +30,12 @@ export interface MountOptions {
 
 export interface Mounted {
   dispose(): void;
-  /** Exposed for tests: the DOM applier the mutation stream/flush feeds. */
+  /** Exposed for tests: the DOM applier the mutation stream feeds. */
   applier: DomApplier;
   /** Exposed for tests: the event dispatcher wired as the applier's
    * ListenerDelegate. */
   dispatcher: EventDispatcher;
-  /** Exposed for tests: the stream-transport frame decoder (created
-   * regardless of transport; only fed under the stream transport). Lets a
+  /** Exposed for tests: the stream-transport frame decoder. Lets a
    * test confirm the zero-copy direct-read path actually engaged —
    * `pending()` returns 0 once every delivered byte has been decoded into
    * whole frames, with no heavier instrumentation needed. */
@@ -143,13 +142,6 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
         // normal operation. Route a rejection (peer trap, teardown) to
         // onError rather than letting it become unhandled.
         stream.readDirect(consume).catch(onError);
-      },
-      // Call transport: one synchronous import per batch. `strings` is
-      // already a host string at the lift (contract "call transport"
-      // doc); decodeBatch slices it directly, no framing needed (unlike
-      // the stream transport, this transport IS exactly one batch).
-      flush: (ops: Uint8Array, strings: string): void => {
-        decodeBatch(ops, strings, applier);
       },
       DomEvent,
     },

@@ -38,24 +38,13 @@ use crate::events::{WitEventConverter, WitEventData};
 use crate::protocol::Interner;
 use crate::writer::MutationWriter;
 
-/// Which of the two `surface` transports this instance uses. Selected once at
-/// launch; `wit/world.wit` declares interleaving them undefined.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Transport {
-    /// `surface.open` + framed writes on a `stream<u8>`.
-    Stream,
-    /// One `surface.flush(ops, strings)` call per batch.
-    Call,
-}
-
 /// Everything the flush path needs, shared by the `run` loop and by
 /// `handle-event`.
 struct Renderer {
     writer: MutationWriter,
-    transport: Transport,
-    /// Present only for [`Transport::Stream`], and *taken* for the duration of
-    /// a write so a second flusher can detect an in-flight write instead of
-    /// panicking on a re-entrant `RefCell` borrow.
+    /// Taken for the duration of a write so a second flusher can detect an
+    /// in-flight write instead of panicking on a re-entrant `RefCell`
+    /// borrow.
     stream: Option<StreamWriter<u8>>,
     /// Frame bytes staged while another task owns `stream`. The in-flight
     /// flusher drains this before giving the writer back, which keeps frames
@@ -85,18 +74,14 @@ thread_local! {
 
 /// Stage the current batch (if non-empty) and push it to the host.
 ///
-/// Stream: appends one frame and writes it. `StreamWriter::write_all` returns
-/// the values it could *not* write, which happens only once the read end is
+/// Appends one frame and writes it. `StreamWriter::write_all` returns the
+/// values it could *not* write, which happens only once the read end is
 /// gone; there is no short-write case to retry because `write_all` already
 /// loops. When the host's direct-read session is parked the whole write
 /// completes inline, so this await normally does not yield.
-///
-/// Call: hands the two segments to `surface::flush`, which the host applies
-/// synchronously.
 async fn flush() {
     enum Action {
         Nothing,
-        Call(Vec<u8>, String),
         Stream(StreamWriter<u8>, Vec<u8>),
         /// Another task owns the stream writer; our frame was staged and will
         /// be drained by that task in order.
@@ -112,31 +97,23 @@ async fn flush() {
             // The reader is gone; drop this batch instead of staging it into
             // `pending` (which would otherwise grow unboundedly across every
             // future flush once the host has torn down its read end).
-            r.writer.batch.take_segments();
+            let mut discard = Vec::new();
+            r.writer.batch.take_frame(&mut discard);
             return Action::Nothing;
         }
-        match r.transport {
-            Transport::Call => {
-                let (ops, strings) = r.writer.batch.take_segments();
-                Action::Call(ops, strings)
-            }
-            Transport::Stream => {
-                r.scratch.clear();
-                r.writer.batch.take_frame(&mut r.scratch);
-                match r.stream.take() {
-                    Some(w) => Action::Stream(w, std::mem::take(&mut r.scratch)),
-                    None => {
-                        r.pending.extend_from_slice(&r.scratch);
-                        Action::Staged
-                    }
-                }
+        r.scratch.clear();
+        r.writer.batch.take_frame(&mut r.scratch);
+        match r.stream.take() {
+            Some(w) => Action::Stream(w, std::mem::take(&mut r.scratch)),
+            None => {
+                r.pending.extend_from_slice(&r.scratch);
+                Action::Staged
             }
         }
     });
 
     match action {
         Action::Nothing | Action::Staged => {}
-        Action::Call(ops, strings) => surface::flush(&ops, &strings),
         Action::Stream(mut w, mut bytes) => {
             loop {
                 // `write_all` loops internally over partial writes and gives
@@ -193,11 +170,11 @@ fn wait_for_work() -> impl Future<Output = ()> {
 
 /// Implementation of the world's `run` export.
 ///
-/// Installs the event converter, builds the VirtualDom, opens the transport,
-/// mounts the app (`rebuild` → one batch), then serves the scheduler forever.
-/// `run`'s future never resolves in normal operation, as documented in
-/// `wit/world.wit`.
-pub async fn run(root: fn() -> Element, transport: Transport) {
+/// Installs the event converter, builds the VirtualDom, opens the mutation
+/// stream, mounts the app (`rebuild` → one batch), then serves the
+/// scheduler forever. `run`'s future never resolves in normal operation, as
+/// documented in `wit/world.wit`.
+pub async fn run(root: fn() -> Element) {
     // dioxus-html's converter slot is global and write-once per process; a
     // component instance is a fresh process image, so this runs exactly once.
     dioxus_html::set_event_converter(Box::new(WitEventConverter));
@@ -208,21 +185,14 @@ pub async fn run(root: fn() -> Element, transport: Transport) {
     INTERNER.set(Some(interner.clone()));
     VDOM.set(Some(dom));
 
-    let stream = match transport {
-        Transport::Stream => {
-            let (writer, reader) = wit_stream::new();
-            // Hand the read end over *before* the first batch, per
-            // `wit/world.wit`; the host parks a direct-read session on it.
-            surface::open(reader).await;
-            Some(writer)
-        }
-        Transport::Call => None,
-    };
+    let (writer, reader) = wit_stream::new();
+    // Hand the read end over *before* the first batch, per `wit/world.wit`;
+    // the host parks a direct-read session on it.
+    surface::open(reader).await;
 
     RENDERER.set(Some(Renderer {
         writer: MutationWriter::new(interner),
-        transport,
-        stream,
+        stream: Some(writer),
         pending: Vec::new(),
         scratch: Vec::new(),
         dead: false,
@@ -231,22 +201,17 @@ pub async fn run(root: fn() -> Element, transport: Transport) {
     render(|dom, w| dom.rebuild(w));
     flush().await;
 
-    // The persistent scheduler loop exists only under the stream transport.
-    // Its park (wait_for_work: a plain Rust future woken cross-task, no WIT
-    // waitable) is legal there because the host retains a parked direct-read
-    // session on our ops stream — amendment A15 host retention, so a
-    // quiescent instance is the documented embedder-may-act state. The call
-    // transport retains NOTHING host-side once flush returns, so the same
-    // park is indistinguishable from a deadlock and polyengine (correctly)
-    // traps it. Call-transport `run` therefore returns after the mount:
-    // handle-event renders and flushes itself, and its render_immediate →
-    // process_events still polls tasks dirtied in between, so events keep
-    // working — but background async work cannot wake the instance between
-    // events. Documented degradation of the bench/debug transport.
-    if matches!(transport, Transport::Call) {
-        return;
-    }
-
+    // The persistent scheduler loop's park (`wait_for_work`: a plain Rust
+    // future woken cross-task, no WIT waitable) is legal because the host
+    // retains a parked direct-read session on our ops stream — amendment
+    // A15 host retention, so a quiescent instance is the documented
+    // embedder-may-act state. (Historical note: an earlier revision of this
+    // crate also supported a synchronous `flush`-per-batch transport with
+    // no host-retained handle to park against, so `run` had to return right
+    // after the mount for that transport instead of entering this loop.
+    // That transport was retired — see `wit/world.wit`'s `surface` doc and
+    // `bench/README.md`'s A/B — and `run` now unconditionally serves the
+    // scheduler forever.)
     loop {
         wait_for_work().await;
         render(|dom, w| dom.render_immediate(w));
@@ -309,8 +274,7 @@ pub async fn handle_event(target: u32, name: u16, payload: Payload, ev: &DomEven
 /// Wire an app crate's root component into the `polymorph:dioxus/app` world.
 ///
 /// ```ignore
-/// polyengine_dioxus::launch!(App);                                  // stream
-/// polyengine_dioxus::launch!(App, polyengine_dioxus::Transport::Call);
+/// polyengine_dioxus::launch!(App);
 /// ```
 ///
 /// Expands to a unit type implementing the generated `Guest` trait plus the
@@ -318,15 +282,12 @@ pub async fn handle_event(target: u32, name: u16, payload: Payload, ev: &DomEven
 #[macro_export]
 macro_rules! launch {
     ($root:path) => {
-        $crate::launch!($root, $crate::Transport::Stream);
-    };
-    ($root:path, $transport:expr) => {
         #[doc(hidden)]
         struct __PolyengineDioxusApp;
 
         impl $crate::bindings::Guest for __PolyengineDioxusApp {
             async fn run() {
-                $crate::driver::run($root, $transport).await
+                $crate::driver::run($root).await
             }
 
             async fn handle_event(

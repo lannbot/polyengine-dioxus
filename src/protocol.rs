@@ -77,7 +77,7 @@ fn strref(ns: Option<u16>) -> u16 {
 /// `dynstr` operands reference. See the module doc and `wit/world.wit` for
 /// the wire format.
 ///
-/// A fresh `Batch` is emptied by `take_frame`/`take_segments`, so a single
+/// A fresh `Batch` is emptied by `take_frame`, so a single
 /// instance can be reused across renders without reallocating buffers each
 /// time (only `Vec::clear`, which retains capacity).
 pub struct Batch {
@@ -328,7 +328,7 @@ impl Batch {
         self.ops.extend_from_slice(&id.to_le_bytes());
     }
 
-    /// Stream transport: append one frame to `out` and clear `self`.
+    /// Append one frame to `out` and clear `self`.
     ///
     /// Frame layout (`wit/world.wit` "# Framing"):
     /// `frame-len:u32 strings-len:u32 strings:u8{strings-len} ops:u8{rest}`,
@@ -343,15 +343,6 @@ impl Batch {
         out.extend_from_slice(&self.ops);
         self.ops.clear();
         self.strings.clear();
-    }
-
-    /// Call transport: hand out `(ops, strings)` segments, clearing `self`.
-    /// No framing header — the `flush` import call's two arguments *are*
-    /// exactly one batch's segments (wit/world.wit: "Framing is NOT used").
-    pub fn take_segments(&mut self) -> (Vec<u8>, String) {
-        let ops = std::mem::take(&mut self.ops);
-        let strings = std::mem::take(&mut self.strings);
-        (ops, strings)
     }
 }
 
@@ -429,6 +420,17 @@ impl Default for Interner {
 mod tests {
     use super::*;
 
+    /// Parse a `take_frame`-produced buffer back into `(ops, strings)`, for
+    /// tests that want to inspect the segments directly (the frame is the
+    /// only segment-extraction API since the call transport's `take_segments`
+    /// was removed).
+    fn unframe(frame: &[u8]) -> (Vec<u8>, String) {
+        let strings_len = u32::from_le_bytes(frame[4..8].try_into().unwrap()) as usize;
+        let strings = String::from_utf8(frame[8..8 + strings_len].to_vec()).unwrap();
+        let ops = frame[8 + strings_len..].to_vec();
+        (ops, strings)
+    }
+
     /// UTF-16 code-unit counting per the `dynstr` doc: ASCII fast path,
     /// multi-byte BMP chars (1 code unit each), and surrogate pairs (2 code
     /// units for one `char` outside the BMP).
@@ -458,7 +460,9 @@ mod tests {
 
         let mut b = Batch::new();
         b.create_text_node(0, &long);
-        let (ops, strings) = b.take_segments();
+        let mut out = Vec::new();
+        b.take_frame(&mut out);
+        let (ops, strings) = unframe(&out);
         // op byte, id:u32, then dynstr: 0xffff u16 + u32 actual len
         assert_eq!(ops[0], op::CREATE_TEXT_NODE);
         let len16_field = u16::from_le_bytes([ops[5], ops[6]]);
@@ -478,7 +482,9 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(interner.resolve(a), Some("div"));
         // Only one cache-string op should have been emitted.
-        let (ops, _) = batch.take_segments();
+        let mut out = Vec::new();
+        batch.take_frame(&mut out);
+        let (ops, _) = unframe(&out);
         assert_eq!(ops[0], op::CACHE_STRING);
         assert_eq!(ops.iter().filter(|&&b| b == op::CACHE_STRING).count(), 1);
     }

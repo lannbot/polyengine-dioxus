@@ -1,6 +1,5 @@
-//! Host-transport test fixture: no-dioxus guest exercising both mutation
-//! transports (stream / call, selected by the `call-transport` feature) and
-//! the round-trip event path.
+//! Host-transport test fixture: no-dioxus guest exercising the stream
+//! mutation transport and the round-trip event path.
 //!
 //! Governing doc: wit/world.wit (normative wire format + world `app`).
 //! Op-sequence/behavior spec: the polyengine-dioxus host-runtime dispatch
@@ -46,7 +45,6 @@ wit_bindgen::generate!({
     world: "app",
 });
 
-#[cfg(not(feature = "call-transport"))]
 use core::cell::RefCell;
 use polymorph::dioxus::surface::{self, DomEvent as HostDomEvent};
 
@@ -198,9 +196,8 @@ mod wire {
         }
     }
 
-    /// Stream-transport framing (wit/world.wit "# Framing (stream transport
-    /// only)"): `frame-len:u32 strings-len:u32 strings ops`.
-    #[cfg(not(feature = "call-transport"))]
+    /// Stream-transport framing (wit/world.wit "# Framing"):
+    /// `frame-len:u32 strings-len:u32 strings ops`.
     pub fn frame(ops: &[u8], strings: &str) -> Vec<u8> {
         let strings_bytes = strings.as_bytes();
         let frame_len = 4 + strings_bytes.len() as u32 + ops.len() as u32;
@@ -322,7 +319,6 @@ fn build_event_batch(name: u16, payload: &Payload) -> (Vec<u8>, String, bool) {
 // is parked, so no cross-task interleaving. Do not hold RefCell borrows
 // across awaits." — every use below `take()`s the writer out of the cell
 // before awaiting, and puts it back after, so no borrow spans an `.await`).
-#[cfg(not(feature = "call-transport"))]
 thread_local! {
     static WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<u8>>> = const { RefCell::new(None) };
 }
@@ -339,7 +335,6 @@ thread_local! {
 // taken back out, so never dropped): dropping an unwritten stream writer is
 // legal per the CABI (unlike `future`'s A8 write-before-drop obligation),
 // but we don't even want the reader to observe end-of-stream.
-#[cfg(not(feature = "call-transport"))]
 thread_local! {
     static PARK_WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<u8>>> = const { RefCell::new(None) };
 }
@@ -350,67 +345,32 @@ impl Guest for Component {
     async fn run() {
         let (ops, strings) = build_initial_batch();
 
-        #[cfg(not(feature = "call-transport"))]
-        {
-            // Guest creates the stream and hands the host the read end
-            // ONCE, before the first batch (wit: "Called at most once,
-            // before the first batch is written").
-            let (mut writer, reader) = wit_stream::new::<u8>();
-            surface::open(reader).await;
-            let frame = wire::frame(&ops, &strings);
-            writer.write_all(frame).await;
-            WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
-        }
-        #[cfg(feature = "call-transport")]
-        {
-            surface::flush(&ops, &strings);
-            // CONTRACT: the dispatch's spec says "For the call build run()
-            // can also park the same way after the initial flush" — but a
-            // purely-local park (a stream/future the host never sees) has
-            // NO host-side retention (embedder-api.md amendment A15: the
-            // deadlock-verdict suppression tracks host retention), and the
-            // call transport's world surface (`flush` only, no channel)
-            // gives the guest nothing host-retained to park on. Empirically
-            // confirmed: parking here traps `deadlock detected: event loop
-            // cannot make further progress` — a real, correctly-detected
-            // deadlock, not a bug to work around. Returning normally is the
-            // conservative reading: `handle-event` remains fully callable
-            // afterward (it only ever calls the sync `flush` import, which
-            // needs no ongoing task), so nothing in the dispatch's actual
-            // test assertions (round-trip + ordering) depends on `run`
-            // staying unsettled for this transport. Flagged prominently in
-            // the track report.
-        }
+        // Guest creates the stream and hands the host the read end
+        // ONCE, before the first batch (wit: "Called at most once,
+        // before the first batch is written").
+        let (mut writer, reader) = wit_stream::new::<u8>();
+        surface::open(reader).await;
+        let frame = wire::frame(&ops, &strings);
+        writer.write_all(frame).await;
+        WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 
         // wit: "then serve the Dioxus scheduler forever" — this probe has
         // no scheduler; park via a genuine waitable (see PARK_WRITER doc).
-        // Stream transport only (see the CONTRACT note above for why the
-        // call transport can't do this).
-        #[cfg(not(feature = "call-transport"))]
-        {
-            let (park_writer, mut park_reader) = wit_stream::new::<u8>();
-            PARK_WRITER.with(|cell| *cell.borrow_mut() = Some(park_writer));
-            park_reader.next().await;
-            unreachable!("PARK_WRITER is held forever and never written/dropped");
-        }
+        let (park_writer, mut park_reader) = wit_stream::new::<u8>();
+        PARK_WRITER.with(|cell| *cell.borrow_mut() = Some(park_writer));
+        park_reader.next().await;
+        unreachable!("PARK_WRITER is held forever and never written/dropped");
     }
 
     async fn handle_event(_target: u32, name: u16, payload: Payload, ev: &HostDomEvent) {
         let (ops, strings, prevent) = build_event_batch(name, &payload);
 
-        #[cfg(not(feature = "call-transport"))]
-        {
-            let frame = wire::frame(&ops, &strings);
-            let mut writer = WRITER
-                .with(|cell| cell.borrow_mut().take())
-                .expect("handle-event dispatched before run() opened the stream");
-            writer.write_all(frame).await;
-            WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
-        }
-        #[cfg(feature = "call-transport")]
-        {
-            surface::flush(&ops, &strings);
-        }
+        let frame = wire::frame(&ops, &strings);
+        let mut writer = WRITER
+            .with(|cell| cell.borrow_mut().take())
+            .expect("handle-event dispatched before run() opened the stream");
+        writer.write_all(frame).await;
+        WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 
         if prevent {
             ev.prevent_default();

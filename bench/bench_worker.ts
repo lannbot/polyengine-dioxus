@@ -1,17 +1,14 @@
-// bench/bench_worker.ts — runs exactly ONE (op, transport) pair, in its own
-// Deno process, and prints its result to stdout as JSON. See
-// bench/ops.ts's runOp doc for the discovered host-runtime issue this
-// process-per-pair split and the internal bounded-retry loop both exist
-// to contain: the CALL transport's `run` task was observed to
-// occasionally hit a `wasm trap: deadlock detected` after a small number
-// of click/render round trips, in a way not fully eliminated by retries
-// (a genuine timing-sensitive race in the host scheduler, not a bug in
-// this harness). When even the retries are exhausted, this worker prints
-// `medianMs: null` plus the error rather than crashing — one op/transport
-// pair failing should not abort the whole bench run; bench.ts renders
-// that pair as "N/A" and the failure is reported plainly, not hidden.
+// bench/bench_worker.ts — runs exactly ONE op, in its own Deno process, and
+// prints its result to stdout as JSON. See bench/ops.ts's runOp doc for the
+// bounded-retry loop this worker relies on (a defensive net, not because a
+// specific failure mode is currently expected — see bench/ops.ts's
+// MAX_ATTEMPTS_PER_OP doc for the historical issue it was added for). When
+// even the retries are exhausted, this worker prints `medianMs: null` plus
+// the error rather than crashing — one op failing should not abort the
+// whole bench run; bench.ts renders that op as "N/A" and the failure is
+// reported plainly, not hidden.
 //
-// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName> <stream|call>
+// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName> <stream>
 
 import { defaultTranslator } from "@deltic/translator";
 import { loadComponentBytes, ops, runOp } from "./ops.ts";
@@ -23,8 +20,8 @@ async function main() {
   if (!op) {
     throw new Error(`unknown op "${opName}"; known ops: ${ops.map((o) => o.name).join(", ")}`);
   }
-  if (transportArg !== "stream" && transportArg !== "call") {
-    throw new Error(`transport must be "stream" or "call", got "${transportArg}"`);
+  if (transportArg !== "stream") {
+    throw new Error(`transport must be "stream", got "${transportArg}"`);
   }
   const transport: TransportName = transportArg;
 

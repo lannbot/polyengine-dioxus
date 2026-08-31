@@ -40,8 +40,8 @@ test:
     cargo test
     deno task test
 
-# Build the surface-probe fixture components (both transports) into
-# fixtures/build/. The full-stack host tests load these.
+# Build the surface-probe fixture component into fixtures/build/. The
+# full-stack host tests load it.
 fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -49,13 +49,8 @@ fixtures:
     cargo build -p surface-probe --target wasm32-unknown-unknown --release
     wasm-tools component new \
       target/wasm32-unknown-unknown/release/surface_probe.wasm \
-      -o fixtures/build/surface-probe-stream.component.wasm
-    cargo build -p surface-probe --target wasm32-unknown-unknown --release --features call-transport
-    wasm-tools component new \
-      target/wasm32-unknown-unknown/release/surface_probe.wasm \
-      -o fixtures/build/surface-probe-call.component.wasm
-    wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe-stream.component.wasm
-    wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe-call.component.wasm
+      -o fixtures/build/surface-probe.component.wasm
+    wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe.component.wasm
 
 # Build an example app component into examples/build/.
 example name:

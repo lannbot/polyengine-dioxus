@@ -21,5 +21,3 @@ pub mod bindings;
 pub mod driver;
 #[cfg(target_arch = "wasm32")]
 pub mod events;
-#[cfg(target_arch = "wasm32")]
-pub use driver::Transport;

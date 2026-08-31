@@ -242,6 +242,20 @@ mod tests {
         MutationWriter::new(Rc::new(RefCell::new(Interner::new())))
     }
 
+    /// Extract `(ops, strings)` segments from a `Batch` via `take_frame`,
+    /// parsing off the frame header (the only segment-extraction API since
+    /// the call transport's `take_segments` was removed — see
+    /// `protocol.rs`'s own `unframe` test helper, duplicated here for
+    /// `writer.rs`'s separate test module).
+    fn take_segments(batch: &mut Batch) -> (Vec<u8>, String) {
+        let mut out = Vec::new();
+        batch.take_frame(&mut out);
+        let strings_len = u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize;
+        let strings = String::from_utf8(out[8..8 + strings_len].to_vec()).unwrap();
+        let ops = out[8 + strings_len..].to_vec();
+        (ops, strings)
+    }
+
     /// Rebuild a real VirtualDom through the writer and compare the produced
     /// segments against a hand-driven `Batch`. Any drift in op order, operand
     /// widths, or intern-before-emit ordering shows up as a byte mismatch.
@@ -258,7 +272,7 @@ mod tests {
         let mut w = writer();
         let mut dom = VirtualDom::new(app);
         dom.rebuild(&mut w);
-        let (ops, strings) = w.batch.take_segments();
+        let (ops, strings) = take_segments(&mut w.batch);
 
         // Hand-driven expectation. Template 0 has one root:
         //   div(class="root")[ button[ text "hi" ] ]
@@ -283,7 +297,7 @@ mod tests {
         let click = i.intern(&mut b, "click");
         b.new_event_listener(2, click, true);
         b.append_children(0, 1);
-        let (exp_ops, exp_strings) = b.take_segments();
+        let (exp_ops, exp_strings) = take_segments(&mut b);
 
         assert_eq!(strings, exp_strings, "string segment");
         assert_eq!(ops, exp_ops, "op segment");
@@ -305,7 +319,7 @@ mod tests {
         let mut w = writer();
         let mut dom = VirtualDom::new(app);
         dom.rebuild(&mut w);
-        let (ops, strings) = w.batch.take_segments();
+        let (ops, strings) = take_segments(&mut w.batch);
 
         // One `rsx!` site => one `Template` identity, registered once and
         // loaded three times. Asserting on bytes (rather than counting
@@ -327,7 +341,7 @@ mod tests {
             b.replace_placeholder(&[0], 1);
         }
         b.append_children(0, 3);
-        let (exp_ops, exp_strings) = b.take_segments();
+        let (exp_ops, exp_strings) = take_segments(&mut b);
         assert_eq!(strings, exp_strings, "string segment");
         assert_eq!(ops, exp_ops, "op segment");
 
@@ -349,7 +363,7 @@ mod tests {
         w.create_event_listener("click", ElementId(1));
         w.create_event_listener("focus", ElementId(2));
         w.remove_event_listener("focus", ElementId(2));
-        let (ops, strings) = w.batch.take_segments();
+        let (ops, strings) = take_segments(&mut w.batch);
 
         let mut b = Batch::new();
         let mut i = Interner::new();
@@ -358,7 +372,7 @@ mod tests {
         let focus = i.intern(&mut b, "focus");
         b.new_event_listener(2, focus, false);
         b.remove_event_listener(2, focus, false);
-        let (exp_ops, exp_strings) = b.take_segments();
+        let (exp_ops, exp_strings) = take_segments(&mut b);
 
         assert_eq!(ops, exp_ops);
         assert_eq!(strings, exp_strings);
@@ -374,7 +388,7 @@ mod tests {
         w.set_attribute("tabindex", None, &AttributeValue::Int(-3), ElementId(1));
         w.set_attribute("hidden", None, &AttributeValue::Bool(false), ElementId(1));
         w.set_attribute("title", None, &AttributeValue::None, ElementId(1));
-        let (ops, strings) = w.batch.take_segments();
+        let (ops, strings) = take_segments(&mut w.batch);
 
         let mut b = Batch::new();
         let mut i = Interner::new();
@@ -386,7 +400,7 @@ mod tests {
         b.set_attribute_bool(1, hidden, None, false);
         let title = i.intern(&mut b, "title");
         b.set_attribute_none(1, title, None);
-        let (exp_ops, exp_strings) = b.take_segments();
+        let (exp_ops, exp_strings) = take_segments(&mut b);
 
         assert_eq!(ops, exp_ops);
         assert_eq!(strings, exp_strings);
@@ -401,7 +415,7 @@ mod tests {
     fn any_attribute_value_is_skipped() {
         let mut w = writer();
         w.set_attribute("data-x", None, &AttributeValue::any_value(7u32), ElementId(1));
-        let (ops, _) = w.batch.take_segments();
+        let (ops, _) = take_segments(&mut w.batch);
         // Only the `cache-string` for "data-x" — no set-attribute op.
         const CACHE_STRING: u8 = 0x01;
         assert_eq!(ops[0], CACHE_STRING);

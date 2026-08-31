@@ -1,7 +1,8 @@
 //! bench-rows: a js-framework-benchmark-shaped row-table app, built to
-//! quantify (1) the stream-vs-call transport delta and (2) absolute
-//! row-operation throughput on the pinned polyengine (see
-//! `bench/README.md` for methodology and the current numbers).
+//! quantify absolute row-operation throughput on the pinned polyengine
+//! (see `bench/README.md` for methodology and the current numbers; it also
+//! records the historical stream-vs-call transport A/B that led to the
+//! call transport's retirement).
 //!
 //! Control surface (ids `bench/bench.ts` clicks): `create-1k`, `create-10k`,
 //! `clear`, `update-every-10th`, `swap-rows`, `append-1k`, plus a per-row
@@ -17,10 +18,6 @@
 //! fixed click sequence is identical across every process run — the
 //! workload's *shape and sequence* are reproducible, not its literal
 //! per-click byte content.
-//!
-//! A cargo feature `call-transport` switches `launch!` to
-//! `Transport::Call`, mirroring `fixtures/surface-probe`'s feature pattern
-//! (`fixtures/surface-probe/Cargo.toml`).
 
 use dioxus::prelude::*;
 
@@ -208,8 +205,4 @@ fn App() -> Element {
     }
 }
 
-#[cfg(not(feature = "call-transport"))]
 polyengine_dioxus::launch!(App);
-
-#[cfg(feature = "call-transport")]
-polyengine_dioxus::launch!(App, polyengine_dioxus::Transport::Call);

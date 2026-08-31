@@ -17,24 +17,21 @@ package polymorph:dioxus@0.1.0;
 
 /// The mutation channel and the live-event handle.
 ///
-/// # Transports
+/// # Transport
 ///
-/// Two transports carry the same op encoding; a guest uses exactly one per
-/// instantiation (selection is a build/config concern; interleaving both in
-/// one session is undefined):
+/// The guest creates a `stream<u8>` and hands the host the read end once,
+/// before the first batch (`open`). The host parks a direct-read session on
+/// it (polyengine amendment A21 `readDirect`): the decode callback runs
+/// synchronously inside the guest's `stream.write` rendezvous over a view
+/// aliasing guest linear memory — zero copies. Batches are framed (see
+/// "Framing") because stream chunking is not preserved end-to-end.
 ///
-/// - **stream** (`open`): the guest creates a `stream<u8>` and hands the
-///   host the read end once, before the first batch. The host parks a
-///   direct-read session on it (polyengine amendment A21 `readDirect`): the
-///   decode callback runs synchronously inside the guest's `stream.write`
-///   rendezvous over a view aliasing guest linear memory — zero copies.
-///   Batches are framed (see "Framing") because stream chunking is not
-///   preserved end-to-end.
-/// - **call** (`flush`): one synchronous import call per batch, ops as
-///   `list<u8>` (one bulk copy) and the string segment as `string` (one
-///   TextDecoder pass at the lift). Framing is NOT used: the two arguments
-///   are exactly one batch's segments. This transport is the benchmark
-///   baseline and debugging path; it may be retired after A/B measurement.
+/// (A second transport — one synchronous `flush(ops: list<u8>, strings:
+/// string)` import call per batch — existed early in this package's
+/// history as a benchmark baseline and debugging path. Retired after
+/// bench/README.md's A/B: bulk-op deltas were within noise and the stream
+/// transport was never meaningfully slower, while the call transport had
+/// structurally degraded async semantics — see `run`'s doc below.)
 ///
 /// # Batch layout
 ///
@@ -48,7 +45,7 @@ package polymorph:dioxus@0.1.0;
 ///   in the op segment.
 /// - **op segment**: opcodes and operands, little-endian, unaligned.
 ///
-/// # Framing (stream transport only)
+/// # Framing
 ///
 /// ```text
 /// frame     := frame-len:u32 strings-len:u32 strings:u8{strings-len} ops:u8{rest}
@@ -155,15 +152,10 @@ package polymorph:dioxus@0.1.0;
 /// Event names cross back on `handle-event` as the same interned u16, so
 /// steady-state event dispatch transfers no string data at all.
 interface surface {
-  /// Hand the host the read end of the mutation stream (stream transport).
-  /// Called at most once, before the first batch is written. The host keeps
-  /// a direct-read session parked on it for the life of the instance.
+  /// Hand the host the read end of the mutation stream. Called at most
+  /// once, before the first batch is written. The host keeps a
+  /// direct-read session parked on it for the life of the instance.
   open: async func(ops: stream<u8>);
-
-  /// Deliver one batch (call transport): `ops` is the op segment, `strings`
-  /// the string segment (already a host string after the lift; the decoder
-  /// slices it directly). Applied synchronously before this call returns.
-  flush: func(ops: list<u8>, strings: string);
 
   /// A live DOM event, lent to the guest for the duration of one
   /// `handle-event` call (the cancelable window). Calling either method
@@ -287,13 +279,12 @@ world app {
   import surface;
 
   /// Start the app: open the mutation channel, perform the initial mount
-  /// (rebuild → one batch), then serve the Dioxus scheduler forever — under
-  /// the stream transport, whose host-parked read session makes the
-  /// quiescent park legal (embedder-api amendment A15 host retention).
-  /// Under the call transport there is no host-retained handle to park
-  /// against, so `run` returns after the mount and event handling drives
-  /// all further rendering; background async work cannot wake the instance
-  /// between events (documented degradation of the bench/debug transport).
+  /// (rebuild → one batch), then serve the Dioxus scheduler forever. The
+  /// persistent park between renders (a plain Rust future woken cross-task,
+  /// no WIT waitable) is legal because the host retains a parked
+  /// direct-read session on the guest's ops stream — component-model-async
+  /// amendment A15 host retention — so a quiescent instance is the
+  /// documented embedder-may-act state.
   export run: async func();
 
   /// Dispatch one DOM event to the listener registered on `target` (the

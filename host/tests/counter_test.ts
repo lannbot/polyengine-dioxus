@@ -1,5 +1,6 @@
 // Full-stack host-runtime test for the REAL Dioxus counter example
-// (examples/counter/src/lib.rs, launch! default = stream transport). This
+// (examples/counter/src/lib.rs, launch! uses the stream transport, the only
+// transport). This
 // exercises the whole pipeline: driver.rs (run/handle-event tasks),
 // writer.rs (mutation batching), events.rs (payload conversion), and the
 // host-side applier/dispatcher/decoder — none of which had ever executed
