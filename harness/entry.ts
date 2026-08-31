@@ -7,7 +7,9 @@
 //
 // Which example to mount is chosen via the page's `?app=` query param
 // (e.g. `?app=todomvc`); defaults to `counter`. The component is fetched
-// from `/${app}.component.wasm` (see e2e/server.ts's mapping). For
+// from `./${app}.component.wasm` (page-relative — see e2e/server.ts's
+// mapping for dev, harness/pages.ts's flat assembly for the
+// GitHub-Pages build). For
 // `todomvc` specifically, a `<link>` to harness/todomvc.css is injected —
 // examples/todomvc drops its `asset!`-based Stylesheet (needs the `dx`
 // CLI's asset pipeline; see examples/todomvc/src/lib.rs's header), so the
@@ -32,6 +34,16 @@
 import { defaultTranslator } from "@deltic/translator";
 import { mountApp } from "../host/src/host.ts";
 
+// Pages assembly mode (harness/pages.ts) injects `window.__DEFAULT_APP`
+// via an inline script before this module loads, so a static
+// GitHub-Pages deployment can pick a non-"counter" default (todomvc)
+// without relying on a `?app=` query param the index.html doesn't set.
+declare global {
+  interface Window {
+    __DEFAULT_APP?: string;
+  }
+}
+
 interface HarnessError {
   source: "onError" | "window.onerror" | "unhandledrejection";
   detail: string;
@@ -51,7 +63,8 @@ async function main(): Promise<void> {
   const root = document.getElementById("app");
   if (!root) throw new Error("harness/index.html must have <div id=app>");
 
-  const app = new URLSearchParams(location.search).get("app") ?? "counter";
+  const app = new URLSearchParams(location.search).get("app") ??
+    (globalThis as unknown as Window).__DEFAULT_APP ?? "counter";
   if (app === "todomvc") {
     const link = document.createElement("link");
     link.rel = "stylesheet";
@@ -72,7 +85,7 @@ async function main(): Promise<void> {
     // best-effort; absence just means the identity probe test fails loudly
   }
 
-  const res = await fetch(`/${app}.component.wasm`);
+  const res = await fetch(`./${app}.component.wasm`);
   if (!res.ok) {
     throw new Error(`fetching component failed: ${res.status} ${res.statusText}`);
   }

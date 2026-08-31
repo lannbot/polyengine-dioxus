@@ -82,6 +82,20 @@ vectors:
 
 # Real-browser (Chromium via Playwright) E2E lane for the counter example.
 # First run: `cd e2e && npm install && npx playwright install chromium --with-deps`.
+# GitHub-Pages-ready static site for the TodoMVC example, assembled flat
+# at harness/dist-pages/ (works under any base path — see
+# harness/pages.ts's header for the relative-URL discipline).
+pages:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f examples/build/counter.component.wasm ]; then
+      just example counter
+    fi
+    if [ ! -f examples/build/todomvc.component.wasm ]; then
+      just example todomvc
+    fi
+    deno run -A harness/pages.ts
+
 e2e:
     #!/usr/bin/env bash
     set -euo pipefail

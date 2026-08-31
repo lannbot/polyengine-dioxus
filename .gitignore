@@ -3,6 +3,7 @@ target/
 node_modules/
 build/
 dist/
+dist-pages/
 # Pinned local checkout of polyengine (see justfile `deps`).
 .deps/
 # Deno/npm lockfiles are committed; caches are not.
