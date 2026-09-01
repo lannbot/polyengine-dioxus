@@ -138,6 +138,142 @@ Deno.test("dispatchTo is a no-op when no ancestor has a matching registration", 
   assertEquals(calls, []);
 });
 
+// Registrations belong to THIS dispatcher's mount root, and ElementIds are
+// per-instance — an ancestor above the root carrying a `data-dioxus-id`
+// (a second mounted app, or a stray attribute in the page) must never
+// resolve, or one instance dispatches another's ids.
+Deno.test("dispatchTo stops at the mount root and never matches an ancestor above it", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  // A wrapper OUTSIDE the root, carrying an id that IS live in this
+  // dispatcher (registered on an element inside the root).
+  const wrapper = document.createElement("div");
+  root.parentNode!.insertBefore(wrapper, root);
+  wrapper.appendChild(root);
+
+  const live = document.createElement("button");
+  root.appendChild(live);
+  dispatcher.add(live, 7, 1, "click", true);
+  wrapper.setAttribute("data-dioxus-id", "7");
+
+  // Walk starts inside the root at an element with no registration; nothing
+  // between it and the root matches, so it must stop rather than reach the
+  // wrapper's borrowed id.
+  const inner = document.createElement("span");
+  root.appendChild(inner);
+  dispatcher.dispatchTo(inner, "click", { type: "click" });
+  assertEquals(calls, []);
+
+  // Sanity: the root itself is still eligible (it is node id 0).
+  dispatcher.add(root, 0, 1, "click", true);
+  dispatcher.dispatchTo(inner, "click", { type: "click" });
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].elementId, 0);
+});
+
+// -- purge (unmount / id reuse) ----------------------------------------------
+
+Deno.test("purge: dispatchTo on the purged element no-ops and the id attribute is dropped", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("button");
+  root.appendChild(el);
+  dispatcher.add(el, 4, 1, "click", true);
+  dispatcher.add(el, 4, 2, "focus", false);
+
+  dispatcher.dispatchTo(el, "click", { type: "click" });
+  assertEquals(calls.length, 1);
+
+  dispatcher.purge(4, el);
+  assertEquals(el.hasAttribute("data-dioxus-id"), false);
+
+  dispatcher.dispatchTo(el, "click", { type: "click" });
+  assertEquals(calls.length, 1, "no dispatch after purge");
+
+  // The non-bubbling listener was detached from the element itself.
+  el.setAttribute("data-dioxus-id", "4");
+  el.dispatchEvent(new document.defaultView!.Event("focus"));
+  assertEquals(calls.length, 1, "per-element listener detached by purge");
+});
+
+Deno.test("purge releases the purged element's share of the bubbling refcount", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const removals: string[] = [];
+  // deno-lint-ignore no-explicit-any
+  const realRemove = (root as any).removeEventListener.bind(root);
+  // deno-lint-ignore no-explicit-any
+  (root as any).removeEventListener = (name: string, listener: any) => {
+    removals.push(name);
+    return realRemove(name, listener);
+  };
+
+  const a = document.createElement("button");
+  const b = document.createElement("button");
+  root.appendChild(a);
+  root.appendChild(b);
+  dispatcher.add(a, 1, 10, "click", true); // refcount 1
+  dispatcher.add(b, 2, 10, "click", true); // refcount 2
+
+  dispatcher.purge(1, a); // -> refcount 1, root listener still attached
+  assertEquals(removals, []);
+
+  dispatcher.remove(b, 2, 10, "click", true); // -> refcount 0
+  assertEquals(removals, ["click"], "root listener removed once the count hit zero");
+
+  // And it really is gone: re-attribute an element and dispatch natively.
+  b.setAttribute("data-dioxus-id", "2");
+  b.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  assertEquals(calls, []);
+});
+
+Deno.test("purge of an id with no registrations is a cheap no-op", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  dispatcher.purge(99, document.createElement("div"));
+  // Also fine for a non-Element node (the node table holds Text/Comment).
+  dispatcher.purge(99, document.createTextNode("t"));
+  assertEquals(calls, []);
+});
+
+// -- dispose ------------------------------------------------------------------
+
+Deno.test("dispose detaches every listener and stops dispatch, leaving DOM alone", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const a = document.createElement("button");
+  const b = document.createElement("input");
+  root.appendChild(a);
+  root.appendChild(b);
+  dispatcher.add(a, 1, 10, "click", true);
+  dispatcher.add(b, 2, 20, "focus", false);
+
+  a.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  b.dispatchEvent(new document.defaultView!.Event("focus"));
+  assertEquals(calls.length, 2);
+
+  dispatcher.dispose();
+
+  a.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  b.dispatchEvent(new document.defaultView!.Event("focus"));
+  dispatcher.dispatchTo(a, "click", { type: "click" });
+  assertEquals(calls.length, 2, "no dispatch of any kind after dispose");
+
+  // dispose detaches the runtime; it does not unrender or strip markers.
+  assertEquals(a.getAttribute("data-dioxus-id"), "1");
+  assertEquals(root.childNodes.length, 2);
+});
+
 // -- payload family mapping / value shapes -----------------------------------
 
 Deno.test("serializePayload: mouse family with full field mapping + modifiers", () => {

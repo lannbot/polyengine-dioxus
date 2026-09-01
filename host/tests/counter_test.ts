@@ -170,4 +170,24 @@ Deno.test("counter example: mount, click, type, list, form submit", async () => 
   assertEquals(errors, [], "no onError callback ever fired");
 
   mounted.dispose();
+
+  // 7) After dispose the runtime is detached: a further dispatch changes
+  // nothing and surfaces no error. Dropping the mutation stream's read end
+  // RESOLVES the parked direct-read session (embedder-api.md A21's
+  // reader-drop rule) rather than rejecting it, so `onError` stays silent;
+  // the guest sees reader-gone on its next write and goes dark.
+  const before = root.innerHTML;
+  const postDispose = click(inc);
+  mounted.dispatch(inc, "click", postDispose);
+  // Settle the same way the file's waitFor does — a macrotask turn is
+  // enough for a queued dispatch or a stream rejection to land.
+  await new Promise((r) => setTimeout(r, 0));
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals(root.innerHTML, before, "no DOM change after dispose");
+  assertEquals(errors, [], "dispose surfaces no error");
+
+  // 8) dispose is idempotent.
+  mounted.dispose();
+  await new Promise((r) => setTimeout(r, 0));
+  assertEquals(errors, []);
 });

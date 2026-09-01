@@ -667,6 +667,7 @@ dependencies = [
  "dioxus-core",
  "dioxus-core-types",
  "dioxus-html",
+ "rustc-hash",
  "serde_json",
  "wit-bindgen",
 ]

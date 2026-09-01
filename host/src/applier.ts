@@ -27,6 +27,9 @@ export interface ListenerDelegate {
     name: string,
     bubbles: boolean,
   ): void;
+  /** Drop every registration for `elementId` — its element left the tree or
+   * its id was reassigned. `el` is the OLD node. */
+  purge(elementId: number, el: Node): void;
 }
 
 const NS_STYLE = "style";
@@ -114,6 +117,15 @@ export class DomApplier implements OpSink {
   }
 
   #setNode(id: number, node: Node): void {
+    // Id reuse is the reliable unmount signal: dioxus frees an ElementId
+    // before reassigning it, and never emits remove-event-listener ops for
+    // an unmounted subtree. Purging the OLD node's registrations here is
+    // what stops a reused id from inheriting the dead element's listener
+    // names (and dispatching them at the new element).
+    const old = this.#nodes[id];
+    if (old !== undefined && old !== node) {
+      this.#delegate.purge(id, old);
+    }
     this.#nodes[id] = node;
   }
 
@@ -430,9 +442,16 @@ export class DomApplier implements OpSink {
 
   remove(id: number): void {
     const node = this.#getNode(id) as ChildNode;
-    // v1: removal does not synthesize listener-remove callbacks, mirroring
-    // the reference (removeAllNonBubblingListeners is only called from
-    // hydration/GC paths there, not from a generic `remove` op).
+    // The guest never synthesizes listener-remove ops for an unmounted
+    // subtree (mirroring the reference, where removeAllNonBubblingListeners
+    // is a hydration/GC path only). Staleness is instead bounded from both
+    // ends: an explicit `remove` is the early signal for THIS id, and
+    // `#setNode`'s purge-on-reuse catches every descendant id. Descendant
+    // registrations therefore linger in the dispatcher's maps only until
+    // dioxus reuses their ids, and can never mis-dispatch — a reused id is
+    // purged before the new node is recorded, and until then no live DOM
+    // node carries that `data-dioxus-id` for target resolution to find.
+    this.#delegate.purge(id, node);
     node.parentNode?.removeChild(node);
   }
 

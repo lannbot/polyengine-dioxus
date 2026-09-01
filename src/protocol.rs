@@ -7,7 +7,7 @@
 //! `TextDecoder` pass). See `wit/world.wit`'s `run` export doc
 //! comment for the normative format; this module must match it exactly.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// `strref` sentinel for "no namespace" (wit/world.wit: "0xffff = none where
 /// the operand is optional").
@@ -380,7 +380,7 @@ impl Default for Batch {
 pub struct Interner {
     /// Keyed by `(ptr as usize, len)` — the fat-pointer components of the
     /// `&'static str`, which uniquely identify a given static allocation.
-    ids: HashMap<(usize, usize), u16>,
+    ids: FxHashMap<(usize, usize), u16>,
     /// Reverse map for event dispatch (`resolve`): id -> the original
     /// `&'static str`.
     names: Vec<&'static str>,
@@ -389,7 +389,7 @@ pub struct Interner {
 impl Interner {
     /// Create an empty interner.
     pub fn new() -> Self {
-        Interner { ids: HashMap::new(), names: Vec::new() }
+        Interner { ids: FxHashMap::default(), names: Vec::new() }
     }
 
     /// Return the interned id for `s`, emitting `cache-string` into `batch`
