@@ -132,11 +132,10 @@ async fn flush() {
             return Action::Nothing;
         }
         if r.dead {
-            // The reader is gone; drop this batch instead of staging it into
-            // `pending` (which would otherwise grow unboundedly across every
-            // future flush once the host has torn down its read end).
-            let mut discard = Vec::new();
-            r.writer.batch.take_frame(&mut discard);
+            // The reader is gone; discard this batch instead of staging it
+            // into `pending` (which would otherwise grow unboundedly across
+            // every future flush once the host has torn down its read end).
+            r.writer.batch.clear();
             return Action::Nothing;
         }
         r.scratch.clear();

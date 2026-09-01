@@ -328,6 +328,20 @@ impl Batch {
         self.ops.extend_from_slice(&id.to_le_bytes());
     }
 
+    /// Discard the accumulated batch without encoding anything, retaining
+    /// buffer capacity. The teardown path's cheap alternative to assembling
+    /// a frame nobody will read.
+    ///
+    /// NOTE: interned-string state lives in [`Interner`], not here, and an
+    /// interner emits each `cache-string` op exactly once — so ops discarded
+    /// by this method may include cache-string definitions that will never
+    /// be re-sent. That is fine on a dead channel (nothing will read future
+    /// batches either); it is NOT a way to "skip" a batch on a live one.
+    pub fn clear(&mut self) {
+        self.ops.clear();
+        self.strings.clear();
+    }
+
     /// Append one frame to `out` and clear `self`.
     ///
     /// Frame layout (`wit/world.wit` "# Framing"):
