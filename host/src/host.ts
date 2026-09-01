@@ -11,6 +11,7 @@ import type { Translator } from "@deltic/runtime/shim";
 import type { DirectSource, Stream } from "@deltic/protocol";
 
 import { DomApplier } from "./applier.ts";
+import { DispatchGate } from "./dispatch.ts";
 import { FrameDecoder } from "./decoder.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
@@ -112,57 +113,55 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   // deno-lint-ignore no-explicit-any
   let handleEventExport: ((...a: any[]) => unknown) | undefined;
 
-  // Reentrancy guard: while a `handle-event` export call is in flight, the
-  // guest's own synchronous DOM mutations (issued mid-call, before the
-  // call's promise settles — e.g. `replaceWith`ing a focused `<input>` out
-  // of the DOM) can make the browser fire a SECOND, synchronous native
-  // event (`focusout`/`blur`) before the first call returns. Entering the
-  // same component instance a second time while the first entry is still
-  // on the stack is forbidden by the component model (observed: "Trap:
-  // cannot enter component instance 0 (reentrance forbidden)" — see
-  // .deps/polyengine/docs/architecture.md's `enter-sync-call` gate,
-  // cited by the trap message's own wording). This is a genuine host-side
-  // scheduling gap, not a guest bug: TodoMVC's edit-flow
-  // (`onkeydown` Enter -> `is_editing.set(false)` -> re-render replaces
-  // `.edit` with `.view` -> browser fires `focusout` on the now-detached,
-  // still-focused input -> its own `onfocusout` handler tries to dispatch
-  // reentrantly) is exactly this pattern, and is unremarkable app code
-  // (examples/todomvc/src/lib.rs's `TodoEntry`, ported verbatim from
-  // dioxus's own example).
+  // Reentrancy guard. Entering the component instance while a guest
+  // activation is already live is forbidden by the component model
+  // (observed: "Trap: cannot enter component instance 0 (reentrance
+  // forbidden)" — see .deps/polyengine/docs/architecture.md's
+  // `enter-sync-call` gate, cited by the trap message's own wording). Two
+  // distinct host-side windows reach that from ordinary app code:
   //
-  // Fix: serialize entries into the guest. A reentrant dispatch attempt is
-  // queued (payload/DomEvent captured immediately, before queueing, since
-  // the native event object may be stale by the time it is replayed) and
-  // replayed once the in-flight call's promise settles, preserving
-  // dispatch order without ever holding two live entries into the same
-  // instance.
-  let guestCallInFlight = false;
-  const pendingDispatches: Array<() => void> = [];
+  // (1) While a `handle-event` export call is in flight. The guest's own
+  //     synchronous DOM mutations (issued mid-call, before the call's
+  //     promise settles — e.g. `replaceWith`ing a focused `<input>` out of
+  //     the DOM) can make the browser fire a SECOND, synchronous native
+  //     event (`focusout`/`blur`) before the first call returns. This is a
+  //     genuine host-side scheduling gap, not a guest bug: TodoMVC's
+  //     edit-flow (`onkeydown` Enter -> `is_editing.set(false)` ->
+  //     re-render replaces `.edit` with `.view` -> browser fires `focusout`
+  //     on the now-detached, still-focused input -> its own `onfocusout`
+  //     handler tries to dispatch reentrantly) is exactly this pattern, and
+  //     is unremarkable app code (examples/todomvc/src/lib.rs's
+  //     `TodoEntry`, ported verbatim from dioxus's own example).
+  //
+  // (2) While mutations are being APPLIED, with no `handle-event` in flight
+  //     at all. A scheduler-driven flush (guest timer/async re-render)
+  //     delivers frames through the mutation stream's direct-read `consume`
+  //     callback below, and DOM application runs synchronously inside it —
+  //     i.e. inside the guest's stream-write rendezvous, with a live guest
+  //     turn on the stack (the reentrance bracket is turn-scoped: taken
+  //     around every thread resumption, released when the thread parks —
+  //     .deps/polyengine/runtime/src/task/thread.ts). A native event fired
+  //     by the mutation itself would enter the guest straight out of the
+  //     rendezvous. That is forbidden outright by embedder-api.md amendment
+  //     A21 ("Inside the callback, calls that can run guest code or operate
+  //     this stream are forbidden (reentrancy)") as well as trapping.
+  //
+  // Fix: serialize entries into the guest through `DispatchGate` (see
+  // ./dispatch.ts for the full rationale, including why a microtask-
+  // deferred drain is always in a legal window, and the lost-preventDefault
+  // caveat for deferred dispatches). A dispatch attempted in either window
+  // is queued (payload/DomEvent captured immediately, before queueing,
+  // since the native event object may be stale by the time it is replayed)
+  // and replayed once the window closes, preserving dispatch order without
+  // ever holding two live entries into the same instance.
+  const gate = new DispatchGate(onError);
 
   function dispatchEvent(elementId: number, nameId: number, name: string, ev: NativeEventLike): void {
     if (disposed || !handleEventExport) return;
+    // Captured BEFORE queueing — the native event may be stale at replay.
     const payload = serializePayload(name, ev);
     const domEvent = new DomEvent(ev);
-    const enter = () => {
-      guestCallInFlight = true;
-      // Export calls are uniformly Promise-shaped (embedder-api.md
-      // "Functions and async"); we don't await it (fire-and-forget from
-      // the DOM listener's perspective — the guest's own re-render flows
-      // through the mutation channel independently), but a rejection must
-      // not become an unhandled rejection.
-      Promise.resolve(handleEventExport!(elementId, nameId, payload, domEvent))
-        .catch(onError)
-        .finally(() => {
-          guestCallInFlight = false;
-          const next = pendingDispatches.shift();
-          if (next) next();
-        });
-    };
-    if (guestCallInFlight) {
-      pendingDispatches.push(enter);
-    } else {
-      enter();
-    }
+    gate.dispatch(() => handleEventExport!(elementId, nameId, payload, domEvent));
   }
 
   const imports = {
@@ -194,14 +193,23 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   // `markRead` always receives `view.length`, never 0.
   const consume = (src: DirectSource): "more" | "done" => {
     const view = src.remaining();
-    const n = frameDecoder.feed(view);
-    if (n < view.length) {
-      frameDecoder.stashRest(view, n);
-    }
     // The callback runs DOM application only (decodeBatch via the
-    // FrameDecoder) — it never calls back into guest code, honoring the A21
-    // reentrancy rule ("calls that can run guest code ... are forbidden"
-    // inside a direct-read callback).
+    // FrameDecoder) — no direct guest call. But DOM application can fire
+    // synchronous NATIVE events (detaching a focused element fires
+    // `focusout`), whose listeners would dispatch into the guest from
+    // inside this rendezvous. The gate enforces the A21 rule ("calls that
+    // can run guest code ... are forbidden" inside a direct-read callback)
+    // transitively: dispatches raised in this window are queued and drained
+    // by a microtask, once the rendezvous' guest turn has unwound.
+    gate.beginApply();
+    try {
+      const n = frameDecoder.feed(view);
+      if (n < view.length) {
+        frameDecoder.stashRest(view, n);
+      }
+    } finally {
+      gate.endApply();
+    }
     src.markRead(view.length);
     return "more";
   };
@@ -227,9 +235,13 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
       // only documented release path. We therefore just mark ourselves
       // disposed (suppressing further dispatch/onError activity); the
       // stream's direct-read session, if any, is released when the
-      // component instance itself is garbage-collected or traps. If a
-      // future embedder-api revision adds instance disposal, wire it here.
+      // component instance itself is garbage-collected or traps. Disposing
+      // the gate drops any queued dispatches, so nothing enters the guest
+      // after this point; the remaining teardown gaps above are unchanged.
+      // If a future embedder-api revision adds instance disposal, wire it
+      // here.
       disposed = true;
+      gate.dispose();
     },
   };
   return mounted;
