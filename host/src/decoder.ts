@@ -380,9 +380,11 @@ export class FrameDecoder {
     }
 
     let off = 0;
+    // `buf` never changes inside the loop (only `off` advances), so the view
+    // is hoisted rather than reconstructed per frame.
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
     while (true) {
       if (buf.byteLength - off < 8) break; // need frame-len + strings-len
-      const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
       const frameLen = view.getUint32(off, true);
       const total = 4 + frameLen; // frame-len field itself + its payload
       if (buf.byteLength - off < total) break; // partial frame

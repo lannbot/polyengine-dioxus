@@ -32,6 +32,10 @@ export interface MountOptions {
 }
 
 export interface Mounted {
+  /** Tear down the runtime: stops event dispatch (queued and future),
+   * detaches every DOM listener this mount attached, and drops the
+   * mutation stream's read end (the guest then observes reader-gone and
+   * stops producing). Rendered DOM is left in place. Idempotent. */
   dispose(): void;
   /** Exposed for tests: the DOM applier the mutation stream feeds. */
   applier: DomApplier;
@@ -228,20 +232,28 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
       dispatcher.dispatchTo(targetEl, name, ev);
     },
     dispose() {
-      // Best-effort teardown: the embedder API (contracts/embedder-api.md
-      // "Module wiring and instantiation") exposes no instance-level
-      // dispose/drop — `EmbedderInstance` is `{ exports, handle, imports }`
-      // with no teardown method, and per-`Stream`/`Future` disposal is the
-      // only documented release path. We therefore just mark ourselves
-      // disposed (suppressing further dispatch/onError activity); the
-      // stream's direct-read session, if any, is released when the
-      // component instance itself is garbage-collected or traps. Disposing
-      // the gate drops any queued dispatches, so nothing enters the guest
-      // after this point; the remaining teardown gaps above are unchanged.
-      // If a future embedder-api revision adds instance disposal, wire it
-      // here.
+      // Per-STREAM disposal is the documented release path: `Stream<T>`
+      // exposes `drop()` (.deps/polyengine/protocol/src/handles.ts:68-82,
+      // "`[Symbol.dispose]` alias"), and embedder-api.md amendment A21
+      // makes reader-drop the designed teardown handshake — "reader/writer
+      // drop resolves the session with its total ... a resolution the
+      // producer's own `done` did not cause is the reader-gone signal".
+      // So dropping the read end RESOLVES the parked direct-read session
+      // (a resolution, not a rejection — `onError` stays silent, and the
+      // `!disposed` guard on the catch is belt-and-braces), and the guest
+      // observes reader-gone on its next write (its driver detects leftover
+      // bytes from `write_all`, sets its `dead` flag, and discards further
+      // batches with bounded memory — src/driver.rs), so it goes dark.
+      //
+      // Instance-level disposal still does not exist in the embedder API
+      // (`EmbedderInstance` is `{ exports, handle, imports }`), so the
+      // component instance itself is released only by GC. Rendered DOM is
+      // left in place: dispose detaches the runtime, it does not unrender.
+      if (disposed) return;
       disposed = true;
       gate.dispose();
+      dispatcher.dispose();
+      ops.drop();
     },
   };
   return mounted;

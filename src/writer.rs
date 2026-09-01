@@ -18,10 +18,10 @@
 //! `emit_template_node` writes the grammar with no further interning.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use dioxus_core::{AttributeValue, ElementId, Template, TemplateAttribute, TemplateNode, WriteMutations};
+use rustc_hash::FxHashMap;
 
 use crate::protocol::{Batch, Interner};
 
@@ -34,17 +34,24 @@ pub struct MutationWriter {
     /// The batch being filled. Drained by the driver's flush.
     pub batch: Batch,
     interner: Rc<RefCell<Interner>>,
-    /// Guest-assigned template ids, keyed by `Template`'s pointer identity
-    /// (dioxus's `Hash`/`PartialEq` for `Template` compare by pointer when
-    /// the build merges identical statics, by value otherwise — either way a
-    /// hit means the host already has the registration).
-    templates: HashMap<Template, u16>,
+    /// Guest-assigned template ids, keyed by the pointer identity of
+    /// `template`'s `roots`/`node_paths`/`attr_paths` slices — mirroring
+    /// upstream `Template`'s own pointer-mode `Hash`/`PartialEq`
+    /// (dioxus-core-0.7.10 src/nodes.rs:312-341) unconditionally, rather
+    /// than only when the build merges identical statics. This makes
+    /// `template_id` O(1) in all build modes; in unmerged-statics builds
+    /// (e.g. debug/dev), two structurally identical templates from distinct
+    /// `rsx!` sites now register twice instead of once — a harmless
+    /// duplicate registration (a few extra wire bytes), the same tradeoff
+    /// `Interner`'s pointer-identity doc in protocol.rs already documents
+    /// for strings.
+    templates: FxHashMap<(usize, usize, usize), u16>,
 }
 
 impl MutationWriter {
     /// Create a writer sharing `interner` with the event-dispatch path.
     pub fn new(interner: Rc<RefCell<Interner>>) -> Self {
-        MutationWriter { batch: Batch::new(), interner, templates: HashMap::new() }
+        MutationWriter { batch: Batch::new(), interner, templates: FxHashMap::default() }
     }
 
     /// The shared interner handle.
@@ -88,20 +95,19 @@ impl MutationWriter {
             TemplateNode::Element { tag, namespace, attrs, children } => {
                 let tag_id = self.intern(tag);
                 let ns_id = self.intern_opt(*namespace);
-                let statics: Vec<_> = attrs
+                let static_count = attrs
                     .iter()
-                    .filter_map(|attr| match attr {
-                        TemplateAttribute::Static { name, value, namespace } => {
-                            Some((*name, *value, *namespace))
-                        }
-                        TemplateAttribute::Dynamic { .. } => None,
-                    })
-                    .collect();
-                self.batch.template_element_open(tag_id, ns_id, statics.len() as u16);
-                for (name, value, ns) in statics {
-                    let name_id = self.intern(name);
-                    let ns_id = self.intern_opt(ns);
-                    self.batch.template_attr(name_id, ns_id, value);
+                    .filter(|attr| matches!(attr, TemplateAttribute::Static { .. }))
+                    .count() as u16;
+                self.batch.template_element_open(tag_id, ns_id, static_count);
+                // Dynamic template attributes are realized later through
+                // `set_attribute`; only static ones are part of the template.
+                for attr in *attrs {
+                    if let TemplateAttribute::Static { name, value, namespace } = attr {
+                        let name_id = self.intern(name);
+                        let ns_id = self.intern_opt(*namespace);
+                        self.batch.template_attr(name_id, ns_id, value);
+                    }
                 }
                 self.batch.template_element_children(children.len() as u16);
                 for child in *children {
@@ -121,7 +127,12 @@ impl MutationWriter {
     /// Panics if more than `u16::MAX` distinct templates are registered
     /// (mirrors [`Interner::intern`]'s id-space guard in protocol.rs).
     fn template_id(&mut self, template: Template) -> u16 {
-        if let Some(&id) = self.templates.get(&template) {
+        let key = (
+            template.roots.as_ptr() as usize,
+            template.node_paths.as_ptr() as usize,
+            template.attr_paths.as_ptr() as usize,
+        );
+        if let Some(&id) = self.templates.get(&key) {
             return id;
         }
         let next = self.templates.len();
@@ -132,7 +143,7 @@ impl MutationWriter {
             u16::MAX
         );
         let id = next as u16;
-        self.templates.insert(template, id);
+        self.templates.insert(key, id);
 
 
         for root in template.roots.iter() {

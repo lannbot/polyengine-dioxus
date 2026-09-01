@@ -331,8 +331,10 @@ export class EventDispatcher implements ListenerDelegate {
   #sink: DispatchSink;
   // event name -> { active count, shared listener } (bubbling)
   #global = new Map<string, { active: number; listener: (e: Event) => void }>();
-  // elementId -> event name -> per-element listener (non-bubbling)
-  #local = new Map<number, Map<string, (e: Event) => void>>();
+  // elementId -> { the element, event name -> per-element listener }
+  // (non-bubbling). The element is stored alongside so `purge`/`dispose`
+  // can detach listeners without the applier handing us the node.
+  #local = new Map<number, { el: Element; listeners: Map<string, (e: Event) => void> }>();
   // elementId -> event name -> bubbles, for target-resolution's
   // "has a registration for that event name" check.
   #registrations = new Map<number, Map<string, Registration>>();
@@ -363,14 +365,31 @@ export class EventDispatcher implements ListenerDelegate {
         entry.active++;
       }
     } else {
-      let byNameLocal = this.#local.get(elementId);
-      if (!byNameLocal) {
-        byNameLocal = new Map();
-        this.#local.set(elementId, byNameLocal);
+      let entry = this.#local.get(elementId);
+      if (!entry) {
+        entry = { el, listeners: new Map() };
+        this.#local.set(elementId, entry);
+      } else {
+        // Defensive: an id reassigned without an intervening purge would
+        // otherwise leave the stale element cached here.
+        entry.el = el;
       }
       const listener = (e: Event) => this.#handle(name, e);
-      byNameLocal.set(name, listener);
+      entry.listeners.set(name, listener);
       el.addEventListener(name, listener);
+    }
+  }
+
+  /** Release one bubbling registration's share of the refcounted root
+   * listener for `name`, removing the root listener at zero. Shared by
+   * `remove` (guest-driven) and `purge` (unmount/id-reuse driven). */
+  #releaseGlobal(name: string): void {
+    const entry = this.#global.get(name);
+    if (!entry) return;
+    entry.active--;
+    if (entry.active <= 0) {
+      this.#root.removeEventListener(name, entry.listener);
+      this.#global.delete(name);
     }
   }
 
@@ -383,21 +402,14 @@ export class EventDispatcher implements ListenerDelegate {
     }
 
     if (bubbles) {
-      const entry = this.#global.get(name);
-      if (entry) {
-        entry.active--;
-        if (entry.active <= 0) {
-          this.#root.removeEventListener(name, entry.listener);
-          this.#global.delete(name);
-        }
-      }
+      this.#releaseGlobal(name);
     } else {
-      const byNameLocal = this.#local.get(elementId);
-      const listener = byNameLocal?.get(name);
+      const entry = this.#local.get(elementId);
+      const listener = entry?.listeners.get(name);
       if (listener) {
         el.removeEventListener(name, listener);
-        byNameLocal!.delete(name);
-        if (byNameLocal!.size === 0) this.#local.delete(elementId);
+        entry!.listeners.delete(name);
+        if (entry!.listeners.size === 0) this.#local.delete(elementId);
       }
     }
 
@@ -406,11 +418,66 @@ export class EventDispatcher implements ListenerDelegate {
     }
   }
 
+  /** Drop every registration for `elementId` — its element left the tree or
+   * its id was reassigned (`el` is the OLD node).
+   *
+   * The guest never emits remove-event-listener ops for unmounted subtrees,
+   * and ElementIds are slab indices that get REUSED, so registrations keyed
+   * by id go stale and a reused id would otherwise inherit the dead
+   * element's names. The applier calls this on both signals (see
+   * applier.ts `#setNode`/`remove`).
+   *
+   * Cheap on the hot path: an id with no registrations costs one Map.get. */
+  purge(elementId: number, el: Node): void {
+    const byName = this.#registrations.get(elementId);
+    if (!byName) return;
+
+    for (const [name, reg] of byName) {
+      if (reg.bubbles) this.#releaseGlobal(name);
+    }
+
+    const entry = this.#local.get(elementId);
+    if (entry) {
+      for (const [name, listener] of entry.listeners) {
+        entry.el.removeEventListener(name, listener);
+      }
+      this.#local.delete(elementId);
+    }
+
+    this.#registrations.delete(elementId);
+    // The old node may be a Text/Comment (the node table holds any Node),
+    // which has no removeAttribute — optional-call rather than a tag check.
+    (el as Element).removeAttribute?.(DIOXUS_ID_ATTR);
+  }
+
+  /** Detach the runtime from the DOM: remove every delegated root listener
+   * and every per-element listener, and forget all bookkeeping. Rendered
+   * DOM (including `data-dioxus-id` attributes) is left in place — dispose
+   * stops dispatch, it does not unrender. */
+  dispose(): void {
+    for (const [name, entry] of this.#global) {
+      this.#root.removeEventListener(name, entry.listener);
+    }
+    this.#global.clear();
+    for (const entry of this.#local.values()) {
+      for (const [name, listener] of entry.listeners) {
+        entry.el.removeEventListener(name, listener);
+      }
+    }
+    this.#local.clear();
+    this.#registrations.clear();
+  }
+
   /** Resolve the target elementId for a dispatched native event: walk
    * `event.target` upward to the first element carrying a `data-dioxus-id`
    * attribute AND a live registration for `name` (dispatch prompt's
-   * resolution rule), then invoke the sink. Testable directly without real
-   * DOM event plumbing. */
+   * resolution rule), then invoke the sink. The walk STOPS at `#root`:
+   * registrations belong to this dispatcher's mount root, and ElementIds
+   * are per-instance, so an ancestor above the root carrying a
+   * `data-dioxus-id` (a second mounted app, or a stray attribute in the
+   * surrounding page) would resolve to an unrelated id — cross-instance
+   * mis-dispatch. The root itself is still eligible (it is node id 0).
+   * Testable directly without real DOM event plumbing. */
   dispatchTo(targetEl: Element | null, name: string, nativeEventLike: NativeEventLike): void {
     let el: Element | null = targetEl;
     while (el) {
@@ -423,6 +490,7 @@ export class EventDispatcher implements ListenerDelegate {
           return;
         }
       }
+      if (el === this.#root) return; // mount-root boundary; never walk above
       el = el.parentElement;
     }
   }

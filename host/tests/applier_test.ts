@@ -20,6 +20,9 @@ function recordingDelegate(): { events: unknown[]; delegate: ListenerDelegate } 
       remove(_el, elementId, nameId, name, bubbles) {
         events.push({ op: "remove", elementId, nameId, name, bubbles });
       },
+      purge(elementId, el) {
+        events.push({ op: "purge", elementId, el });
+      },
     },
   };
 }
@@ -249,6 +252,72 @@ Deno.test("listener delegate recording for add/remove with resolved names", () =
     { op: "add", elementId: 1, nameId: 0, name: "click", bubbles: true },
     { op: "remove", elementId: 1, nameId: 0, name: "click", bubbles: false },
   ]);
+});
+
+// ElementIds are slab indices dioxus REUSES, and the guest never emits
+// remove-event-listener ops for an unmounted subtree — so overwriting a node
+// table slot is the unmount signal, and the delegate must be told to drop the
+// old node's registrations before the new node inherits the id.
+Deno.test("purge: node-table overwrite reports the OLD node (loadTemplate/createTextNode/assignId)", () => {
+  const { root } = makeRoot();
+  const { events, delegate } = recordingDelegate();
+  const applier = new DomApplier(root, delegate);
+  applier.cacheString(0, "div");
+
+  const tmplRoots: TemplateNodeDesc[] = [
+    { kind: "element", tag: 0, ns: null, attrs: [], children: [{ kind: "text", value: "t" }] },
+  ];
+  applier.registerTemplate(0, tmplRoots);
+
+  // First write to id 1: fresh slot, nothing to purge.
+  applier.loadTemplate(0, 0, 1);
+  assertEquals(events, []);
+
+  // Reassign id 1 via loadTemplate -> purge(1, <the first cloned root>).
+  applier.loadTemplate(0, 0, 1);
+  assertEquals(events.length, 1);
+  const p0 = events[0] as { op: string; elementId: number; el: Node };
+  assertEquals(p0.op, "purge");
+  assertEquals(p0.elementId, 1);
+  assertEquals((p0.el as Element).tagName, "DIV");
+
+  // Reassign id 1 via createTextNode -> purge(1, <the second cloned root>).
+  applier.createTextNode(1, "x");
+  assertEquals(events.length, 2);
+  assertEquals((events[1] as { elementId: number }).elementId, 1);
+
+  // Reassign id 1 via assignId (walks from the stack top, the text node) ->
+  // purge(1, <that text node>).
+  applier.assignId(new Uint8Array([]), 1);
+  // assignId with an empty path resolves to the stack top, which IS the
+  // node already in slot 1 — same node, so no purge (guarded by old !== node).
+  assertEquals(events.length, 2, "same-node rewrite must not purge");
+
+  applier.loadTemplate(0, 0, 2); // push a template root
+  applier.assignId(new Uint8Array([0]), 1); // its text child -> id 1
+  assertEquals(events.length, 3);
+  const p2 = events[2] as { op: string; elementId: number; el: Node };
+  assertEquals(p2.op, "purge");
+  assertEquals(p2.elementId, 1);
+  assertEquals(p2.el.textContent, "x", "the OLD node, not the newly assigned one");
+});
+
+Deno.test("purge: remove(id) purges before detaching the node", () => {
+  const { root } = makeRoot();
+  const { events, delegate } = recordingDelegate();
+  const applier = new DomApplier(root, delegate);
+
+  applier.createTextNode(1, "a");
+  applier.appendChildren(0, 1);
+  assertEquals(events, []);
+
+  applier.remove(1);
+  assertEquals(events.length, 1);
+  const p = events[0] as { op: string; elementId: number; el: Node };
+  assertEquals(p.op, "purge");
+  assertEquals(p.elementId, 1);
+  assertEquals(p.el.textContent, "a");
+  assertEquals(root.innerHTML, "");
 });
 
 Deno.test("svg: template element with ns creates namespaced element", () => {
