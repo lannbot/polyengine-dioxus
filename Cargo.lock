@@ -599,13 +599,13 @@ dependencies = [
 [[package]]
 name = "dioxus-sdk-time"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80c25ae93a3f72e734873b97fbd09d9b1b6adff97205fb0ffd8543e3564fb78e"
+source = "git+https://github.com/lannbot/dioxus-sdk?branch=main#390acec245754a3ad54217a0b625ff121d2c95f2"
 dependencies = [
  "dioxus",
  "futures",
  "gloo-timers",
  "tokio",
+ "wasip3",
 ]
 
 [[package]]
@@ -1582,6 +1582,7 @@ version = "0.1.0"
 dependencies = [
  "dioxus",
  "dioxus-primitives",
+ "dioxus-sdk-time",
  "polyengine-dioxus",
  "time",
 ]
@@ -2277,6 +2278,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasip3"
+version = "0.8.0+wasi-0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42a999271e77c083825863fc85404197523b3f3cebe9b402aece658ebea90065"
+dependencies = [
+ "wit-bindgen 0.61.1",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.127"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2512,6 +2522,12 @@ dependencies = [
  "futures",
  "wit-bindgen-rust-macro",
 ]
+
+[[package]]
+name = "wit-bindgen"
+version = "0.61.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e473fd0095479f9689ac7d2a52c427cc96bb2b973ace50238dfcc1ab1cd52d93"
 
 [[package]]
 name = "wit-bindgen-core"

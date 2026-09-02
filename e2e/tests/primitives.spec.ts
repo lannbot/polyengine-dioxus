@@ -180,7 +180,23 @@ test("primitives example: gallery mounts, switch/tabs/accordion interactions wor
   await expect(page.locator(".dx-dialog")).toContainText("Item information");
   await page.locator("#demo-p-dialog-close").click();
 
-  // 7) Zero collected page errors / console errors throughout.
+  // 7) Timers. `#progress-delayed` sleeps 300ms through
+  // `dioxus_sdk_time::sleep` before bumping `#progress-value` by 25. The
+  // workspace patches that crate to a fork whose `wasip3` feature waits on
+  // `wasi:clocks/monotonic-clock`; unpatched, the wait reaches a wasm-bindgen
+  // stub that aborts the instance on wasm32-wasip2 and the value never moves.
+  //
+  // Both halves matter: unchanged immediately after the click (a real
+  // deferral, not a synchronous update), then reaching the new value (the
+  // clock actually fires).
+  const progressValue = page.locator("#progress-value");
+  const beforeDelay = await progressValue.textContent();
+  const expectedAfter = String(Number(beforeDelay) + 25);
+  await page.locator("#progress-delayed").click();
+  expect(await progressValue.textContent(), "the 300ms wait must not resolve synchronously").toBe(beforeDelay);
+  await expect(progressValue).toHaveText(expectedAfter, { timeout: 5_000 });
+
+  // 8) Zero collected page errors / console errors throughout.
   const collectedErrors = await page.evaluate(() =>
     (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
   );

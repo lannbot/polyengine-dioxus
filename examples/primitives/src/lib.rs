@@ -71,17 +71,32 @@
 //! that event, so the state machine reaches `data-state="loaded"` on its own
 //! and the fallback is correctly dropped. Verified in the browser.
 //!
-//! ## Excluded: would ABORT the instance (not degrade)
+//! ## No longer the abort category: timers
 //!
-//! **select, toast, context_menu.** These pull `dioxus-sdk-time` ->
-//! `gloo-timers`. On `wasm32-wasip2` wasm-bindgen compiles to off-target
-//! stubs that panic ("function not implemented on non-wasm32 targets") when
-//! called, which aborts the whole component instance — the app dies, it does
-//! not degrade. This is the one category where the difference matters: every
-//! other exclusion is a matter of taste, this one is a crash. They stay out
-//! until a local substitution for gloo-timers exists.
+//! **select, toast, context_menu** pull `dioxus-sdk-time`, which waited by
+//! calling `setTimeout` through wasm-bindgen. On `wasm32-wasip2` that
+//! compiles to an off-target stub that panics ("function not implemented on
+//! non-wasm32 targets") when called, aborting the whole component instance —
+//! the app dies, it does not degrade. That was the one exclusion that was a
+//! crash rather than a matter of taste.
+//!
+//! The workspace now patches `dioxus-sdk-time` to a fork whose `wasip3`
+//! feature waits on `wasi:clocks/monotonic-clock` instead (root
+//! `Cargo.toml`), an interface this host provides. `#progress-delayed` in the
+//! Progress section is the witness: it sleeps 300ms through
+//! `dioxus_sdk_time::sleep` and then moves `#progress-value`, so the e2e run
+//! fails if the wait ever stops completing.
+//!
+//! What that changes per component:
+//!
+//! - **select** — the timer was its only blocker (a typeahead-buffer clear,
+//!   select/context.rs:69). Adding it is now a matter of vendoring its
+//!   preview stylesheet and writing the composition, not a platform gap.
+//! - **toast, context_menu** — still out, but now for the ordinary reason:
+//!   `document::eval`, same as the degraded group above.
 //!
 //! ## Excluded: missing machinery, no crash involved
+
 //!
 //! - **navbar** — `NavbarItem` requires a `to:` navigation target, i.e. a
 //!   `dioxus-router` `Route` plus a history backend. Neither exists here.
@@ -102,8 +117,9 @@
 //! # Structural ids referenced by the e2e harness
 //!
 //! Root `#primitives-showcase`, plus `#demo-switch`, `#demo-slider`,
-//! `#demo-tabs`, `#demo-accordion-p`, `#demo-progress`, and the live readout
-//! `#switch-state` (exactly `on` or `off`).
+//! `#demo-tabs`, `#demo-accordion-p`, `#demo-progress`, the live readout
+//! `#switch-state` (exactly `on` or `off`), and `#progress-delayed` /
+//! `#progress-value` for the timer witness.
 
 use dioxus::prelude::*;
 use dioxus_primitives::{
@@ -113,6 +129,8 @@ use dioxus_primitives::{
     ContentAlign, ContentSide,
 };
 use dioxus_primitives::{date_picker, dialog};
+use dioxus_sdk_time::sleep;
+use std::time::Duration;
 use time::{Date, Month, UtcDateTime};
 
 /// A calendar month: header (prev/next + month & year selects) over the day
@@ -300,6 +318,20 @@ fn app() -> Element {
                             id: "progress-inc",
                             onclick: move |_| progress_value.set((progress_value() + 10.0).min(100.0)),
                             "+10"
+                        }
+                        // The gallery's witness that `dioxus-sdk-time` waits
+                        // complete here at all — see the module doc's timer
+                        // section and the `[patch.crates-io]` entry in the
+                        // root Cargo.toml. Deferred rather than instant, so
+                        // an assertion can tell a real wait from a
+                        // synchronous update.
+                        button {
+                            id: "progress-delayed",
+                            onclick: move |_| async move {
+                                sleep(Duration::from_millis(300)).await;
+                                progress_value.set((progress_value() + 25.0).min(100.0));
+                            },
+                            "+25 after 300ms"
                         }
                         span { id: "progress-value", "{progress_value()}" }
                     }

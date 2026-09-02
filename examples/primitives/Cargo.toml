@@ -28,3 +28,10 @@ dioxus-primitives = { git = "https://github.com/DioxusLabs/dioxus-components", r
 # not re-export the crate, so the gallery has to name it directly. Already in
 # the tree via dioxus-primitives, so this costs nothing.
 time = { version = "0.3", default-features = false }
+# Used by the gallery's `#progress-delayed` timer witness, and pulled in
+# anyway by `dioxus-primitives` (select, toast, context_menu). The `wasip3`
+# feature has to be switched on by a crate in the graph, which is why the crate
+# is named here: the workspace `[patch.crates-io]` redirects it to the fork
+# that has the feature, and this turns it on. Without it every wait compiles to
+# a wasm-bindgen stub that aborts the instance.
+dioxus-sdk-time = { version = "0.7.0", features = ["wasip3"] }
