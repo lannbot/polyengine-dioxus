@@ -342,3 +342,41 @@ Deno.test("svg: template element with ns creates namespaced element", () => {
   // correctly (checked interactively at authoring time; see report).
   assertEquals(svg.namespaceURI, SVG_NS);
 });
+
+// `nodeFor` is the ElementId->Node resolution the `dom` interface's
+// element handles are built on (wit/world.wit `interface dom`): a miss is
+// legal, since ids are reused slab indices.
+Deno.test("nodeFor: live id resolves, unknown id is undefined", () => {
+  const { root } = makeRoot();
+  const { delegate } = recordingDelegate();
+  const applier = new DomApplier(root, delegate);
+
+  // id 0 is the mount root (wit: "id 0 is the mount root").
+  assertEquals(applier.nodeFor(0), root);
+
+  applier.createTextNode(3, "hi");
+  assertEquals(applier.nodeFor(3)?.textContent, "hi");
+
+  assertEquals(applier.nodeFor(9), undefined);
+  assertEquals(applier.nodeFor(1), undefined);
+});
+
+// `remove` unlinks the node but deliberately keeps the table slot (the
+// slot is cleared when dioxus reuses the id). Documented here because the
+// `dom` interface relies on it: that is exactly why its shared resolver
+// checks `isConnected` on top of `nodeFor` — see createDomImports in
+// host/src/host.ts.
+Deno.test("nodeFor: a removed id still resolves, to a detached node", () => {
+  const { root } = makeRoot();
+  const { delegate } = recordingDelegate();
+  const applier = new DomApplier(root, delegate);
+
+  applier.createTextNode(1, "hi");
+  applier.pushRoot(1);
+  applier.appendChildren(0, 1);
+  assertEquals(applier.nodeFor(1)!.isConnected, true);
+
+  applier.remove(1);
+  assertEquals(applier.nodeFor(1)?.textContent, "hi", "slot survives the removal");
+  assertEquals(applier.nodeFor(1)!.isConnected, false, "but the node is out of the document");
+});

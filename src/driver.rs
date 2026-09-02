@@ -291,7 +291,7 @@ pub async fn handle_event(target: u32, name: u16, payload: Payload, ev: &DomEven
     // keep observes `prevent_default()` calls made on the copy the handlers
     // saw.
     let event = Event::new(
-        Rc::new(PlatformEventData::new(Box::new(WitEventData(payload)))),
+        Rc::new(PlatformEventData::new(Box::new(WitEventData { payload, target }))),
         event_bubbles(name),
     );
     runtime.handle_event(name, event.clone().into_any(), ElementId(target as usize));

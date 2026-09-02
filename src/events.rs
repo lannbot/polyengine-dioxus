@@ -6,7 +6,8 @@
 //! into a family-specific `*Data` on demand, through the global
 //! [`dioxus_html::HtmlEventConverter`]. This module bridges the two:
 //!
-//! - [`WitEventData`] is the newtype we box into `PlatformEventData`.
+//! - [`WitEventData`] is what we box into `PlatformEventData`: the payload
+//!   plus the dispatch's target ElementId.
 //! - [`WitEventConverter`] implements every `convert_*` method by downcasting
 //!   to `WitEventData` and reading the matching payload arm.
 //!
@@ -15,18 +16,25 @@
 //! The WIT `payload` variant has seven arms; dioxus-html has 21 data families.
 //! A `convert_*` for an uncarried family (drag, touch, composition, clipboard,
 //! media, animation, transition, image, resize, visible, selection, toggle,
-//! cancel, mounted) has no data to work from, so it returns that family's
+//! cancel) has no data to work from, so it returns that family's
 //! empty/neutral value — the same thing a renderer returns when the platform
 //! does not supply the information. Those events still *dispatch*: a handler
 //! runs, it just sees zeroed data. This is a deliberate, visible gap rather
 //! than a panic, and it is documented in `wit/world.wit`'s `events` interface.
+//!
+//! `mounted` is *not* in that list: its payload is `empty`, but the value its
+//! handler wants is a live handle to the element, which we build from the
+//! dispatch's `target` (see [`MountedElement`]). That handle implements
+//! dioxus-html's `RenderedElementBacking` in full, over the `dom` WIT
+//! interface — no `MountedData` query reports `NotSupported`.
 //!
 //! Likewise, a mismatched arm (e.g. `keyboard` payload arriving for a mouse
 //! family, which the host should never send) degrades to the neutral value
 //! instead of panicking: a malformed host must not take the app down.
 
 use dioxus_html::geometry::{
-    ClientPoint, ElementPoint, PagePoint, ScreenPoint, WheelDelta,
+    euclid::Point2D, ClientPoint, ElementPoint, PagePoint, Pixels, PixelsRect, PixelsSize,
+    PixelsVector2D, ScreenPoint, WheelDelta,
 };
 use dioxus_html::input_data::{decode_mouse_button_set, MouseButton, MouseButtonSet};
 use dioxus_html::point_interaction::{
@@ -38,20 +46,28 @@ use dioxus_html::{
     HasFileData, HasFocusData, HasFormData, HasImageData, HasKeyboardData, HasMediaData,
     HasMouseData, HasPointerData, HasResizeData, HasScrollData, HasSelectionData, HasToggleData,
     HasTouchData, HasTransitionData, HasVisibleData, HasWheelData, HtmlEventConverter, ImageData,
-    Key, KeyboardData, MediaData, Modifiers, MountedData, MouseData, PlatformEventData,
-    PointerData, ResizeData, ScrollData, SelectionData, ToggleData, TouchData, TouchPoint,
+    Key, KeyboardData, MediaData, Modifiers, MountedData, MountedError, MountedResult, MouseData,
+    PlatformEventData, PointerData, RenderedElementBacking, ResizeData, ScrollData, SelectionData,
+    ScrollBehavior, ScrollLogicalPosition, ScrollToOptions, ToggleData, TouchData, TouchPoint,
     TransitionData, VisibleData, WheelData,
 };
+use std::future::Future;
+use std::pin::Pin;
 
+use crate::bindings::polymorph::dioxus::dom;
 use crate::bindings::polymorph::dioxus::events as wit;
 
 /// The platform event we box into dioxus's [`PlatformEventData`]: the raw WIT
-/// payload for one dispatch, converted lazily by [`WitEventConverter`].
-pub struct WitEventData(pub wit::Payload);
+/// payload for one dispatch, converted lazily by [`WitEventConverter`], plus
+/// the ElementId the dispatch targeted (the handle `dom` operations take).
+pub struct WitEventData {
+    pub payload: wit::Payload,
+    pub target: u32,
+}
 
 impl WitEventData {
     fn mouse(&self) -> wit::MouseData {
-        match &self.0 {
+        match &self.payload {
             wit::Payload::Mouse(m) => *m,
             // Pointer and wheel payloads embed a full mouse snapshot; the
             // corresponding dioxus data types are supertypes of HasMouseData,
@@ -584,6 +600,141 @@ impl dioxus_html::NativeDataTransfer for EmptyDataTransfer {
     }
 }
 
+/// A point in CSS pixels. `dioxus_html::geometry` names `PixelsSize`,
+/// `PixelsRect` and `PixelsVector2D` but has no point alias, and
+/// `PixelsRect`'s origin is exactly this type (`Rect<f64, Pixels>` is
+/// `Point2D<f64, Pixels>` + `Size2D<f64, Pixels>`), so we spell it once here.
+type PixelsPoint = Point2D<f64, Pixels>;
+
+/// The `RenderedElementBacking` behind a `MountedData`: an ElementId the host
+/// can still resolve to a live node, for as long as that node lives.
+///
+/// The trait is covered in full — every method routes to the corresponding
+/// operation of the `dom` WIT interface, which is the authority for what each
+/// one means (`wit/world.wit`; the host implements them against the real DOM).
+/// Nothing here reports `NotSupported`.
+///
+/// Every operation can still fail one way: the ElementId no longer names a
+/// live node. That is expected rather than exceptional — ids are reused slab
+/// indices, so a handle the app stashed outlives its element — and it reaches
+/// the app as `MountedError::OperationFailed(StaleElement)`, never a trap. The
+/// imports are synchronous, so each method returns an already-resolved future.
+struct MountedElement {
+    target: u32,
+}
+
+impl MountedElement {
+    /// The one failure every operation shares.
+    fn stale(&self) -> MountedError {
+        MountedError::OperationFailed(Box::new(StaleElement(self.target)))
+    }
+}
+
+/// `option`-returning query → dioxus result: `none` means no live node.
+fn query<T, U>(
+    el: &MountedElement,
+    got: Option<T>,
+    convert: impl FnOnce(T) -> U,
+) -> Pin<Box<dyn Future<Output = MountedResult<U>>>>
+where
+    U: 'static,
+{
+    Box::pin(std::future::ready(got.map(convert).ok_or_else(|| el.stale())))
+}
+
+/// `bool`-returning command → dioxus result: `false` means no live node.
+fn command(el: &MountedElement, ok: bool) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
+    Box::pin(std::future::ready(if ok { Ok(()) } else { Err(el.stale()) }))
+}
+
+impl RenderedElementBacking for MountedElement {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn get_scroll_offset(&self) -> Pin<Box<dyn Future<Output = MountedResult<PixelsVector2D>>>> {
+        // `scrollLeft`/`scrollTop`: a displacement, hence a vector rather than
+        // a point (dioxus-html geometry.rs:35).
+        query(self, dom::get_scroll_offset(self.target), |p| {
+            PixelsVector2D::new(p.x, p.y)
+        })
+    }
+
+    fn get_scroll_size(&self) -> Pin<Box<dyn Future<Output = MountedResult<PixelsSize>>>> {
+        query(self, dom::get_scroll_size(self.target), |s| {
+            PixelsSize::new(s.width, s.height)
+        })
+    }
+
+    fn get_client_rect(&self) -> Pin<Box<dyn Future<Output = MountedResult<PixelsRect>>>> {
+        query(self, dom::get_client_rect(self.target), |r| {
+            PixelsRect::new(PixelsPoint::new(r.x, r.y), PixelsSize::new(r.width, r.height))
+        })
+    }
+
+    fn scroll_to(
+        &self,
+        options: ScrollToOptions,
+    ) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
+        command(self, dom::scroll_to(self.target, wit_scroll_to_options(options)))
+    }
+
+    fn scroll(
+        &self,
+        coordinates: PixelsVector2D,
+        behavior: ScrollBehavior,
+    ) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
+        let offset = dom::Point { x: coordinates.x, y: coordinates.y };
+        command(self, dom::scroll(self.target, offset, wit_scroll_behavior(behavior)))
+    }
+
+    fn set_focus(&self, focus: bool) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
+        command(self, dom::set_focus(self.target, focus))
+    }
+}
+
+// The guest→host enum conversions below are exhaustive on the dioxus side by
+// construction (no catch-all arm), so a variant added upstream is a compile
+// error here rather than a silent mistranslation into some default.
+
+fn wit_scroll_behavior(behavior: ScrollBehavior) -> dom::ScrollBehavior {
+    match behavior {
+        ScrollBehavior::Instant => dom::ScrollBehavior::Instant,
+        ScrollBehavior::Smooth => dom::ScrollBehavior::Smooth,
+    }
+}
+
+fn wit_scroll_alignment(position: ScrollLogicalPosition) -> dom::ScrollAlignment {
+    match position {
+        ScrollLogicalPosition::Start => dom::ScrollAlignment::Start,
+        ScrollLogicalPosition::Center => dom::ScrollAlignment::Center,
+        ScrollLogicalPosition::End => dom::ScrollAlignment::End,
+        ScrollLogicalPosition::Nearest => dom::ScrollAlignment::Nearest,
+    }
+}
+
+fn wit_scroll_to_options(options: ScrollToOptions) -> dom::ScrollToOptions {
+    // `vertical`/`horizontal` are the DOM's `block`/`inline`; the WIT record
+    // keeps dioxus's names so the mapping is field-for-field.
+    dom::ScrollToOptions {
+        behavior: wit_scroll_behavior(options.behavior),
+        vertical: wit_scroll_alignment(options.vertical),
+        horizontal: wit_scroll_alignment(options.horizontal),
+    }
+}
+
+/// A `dom` operation reported no live node for this ElementId.
+#[derive(Debug)]
+struct StaleElement(u32);
+
+impl std::fmt::Display for StaleElement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "element id {} is no longer live", self.0)
+    }
+}
+
+impl std::error::Error for StaleElement {}
+
 /// Installs into dioxus-html's global converter slot (see
 /// [`dioxus_html::set_event_converter`]); every `Event<XData>` a handler
 /// receives is produced by one of these methods.
@@ -599,7 +750,7 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_pointer_data(&self, event: &PlatformEventData) -> PointerData {
-        match payload(event).map(|p| &p.0) {
+        match payload(event).map(|p| &p.payload) {
             Some(wit::Payload::Pointer(p)) => PointerData::new(Pointer(p.clone())),
             // A mouse-shaped payload still yields usable coordinates; the
             // stylus fields fall back to their neutral values.
@@ -627,7 +778,7 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_keyboard_data(&self, event: &PlatformEventData) -> KeyboardData {
-        match payload(event).map(|p| &p.0) {
+        match payload(event).map(|p| &p.payload) {
             Some(wit::Payload::Keyboard(k)) => KeyboardData::new(Keyboard(k.clone())),
             _ => KeyboardData::new(Keyboard(wit::KeyboardData {
                 key: String::new(),
@@ -641,7 +792,7 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_wheel_data(&self, event: &PlatformEventData) -> WheelData {
-        match payload(event).map(|p| &p.0) {
+        match payload(event).map(|p| &p.payload) {
             Some(wit::Payload::Wheel(w)) => WheelData::new(Wheel(*w)),
             _ => WheelData::new(Wheel(wit::WheelData {
                 mouse: empty_mouse(),
@@ -654,7 +805,7 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
-        match payload(event).map(|p| &p.0) {
+        match payload(event).map(|p| &p.payload) {
             Some(wit::Payload::Form(f)) => FormData::new(Form(f.clone())),
             _ => FormData::new(Form(wit::FormData {
                 value: String::new(),
@@ -665,7 +816,7 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_scroll_data(&self, event: &PlatformEventData) -> ScrollData {
-        match payload(event).map(|p| &p.0) {
+        match payload(event).map(|p| &p.payload) {
             Some(wit::Payload::Scroll(s)) => ScrollData::new(Scroll(*s)),
             _ => ScrollData::new(Scroll(wit::ScrollData {
                 scroll_top: 0.0,
@@ -710,11 +861,13 @@ impl HtmlEventConverter for WitEventConverter {
         MediaData::new(Empty)
     }
 
-    fn convert_mounted_data(&self, _: &PlatformEventData) -> MountedData {
-        // `()` is dioxus's own no-capability `RenderedElementBacking`: every
-        // query returns `MountedError::NotSupported`. onmounted is listed as
-        // uncovered in `wit/world.wit`.
-        MountedData::new(())
+    fn convert_mounted_data(&self, event: &PlatformEventData) -> MountedData {
+        match payload(event) {
+            Some(p) => MountedData::new(MountedElement { target: p.target }),
+            // Not our platform data: `()` is dioxus's own no-capability
+            // backing, every query reporting `NotSupported`.
+            None => MountedData::new(()),
+        }
     }
 
     fn convert_resize_data(&self, _: &PlatformEventData) -> ResizeData {

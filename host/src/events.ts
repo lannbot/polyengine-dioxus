@@ -345,6 +345,39 @@ export class EventDispatcher implements ListenerDelegate {
   }
 
   add(el: Element, elementId: number, nameId: number, name: string, bubbles: boolean): void {
+    // `mounted` is SYNTHETIC (wit/world.wit, `handle-event`): no such DOM
+    // event exists, so attaching a native listener for it — which is what
+    // this method used to do — produces a listener that can never fire and
+    // an `onmounted` handler that never runs. The host fires it itself,
+    // exactly once per registration, through the normal sink.
+    //
+    // Not recorded in `#registrations`: that map exists solely for
+    // `dispatchTo`'s "does this element have a live registration for this
+    // native event name?" check, and no native event will ever carry the
+    // name `mounted`. Registering it would only create a phantom target
+    // (and keep `data-dioxus-id` alive on an element with no real
+    // listeners). The consequence for `purge`/`dispose` is that there is
+    // simply nothing to clean up: neither `#global` nor `#local` nor
+    // `#registrations` ever holds a `mounted` entry, so both already
+    // no-op for it, and a guest-emitted remove-event-listener for
+    // `mounted` likewise finds nothing and is harmless.
+    //
+    // Timing: `add()` is called during batch application, i.e. inside the
+    // DispatchGate's apply window (host.ts's direct-read `consume` brackets
+    // it with beginApply/endApply). The gate therefore QUEUES this
+    // dispatch and drains it in a microtask after `endApply` — which is
+    // exactly the contract's requirement that `mounted` fire after the
+    // batch that created the element has been fully applied, with the node
+    // in the document. No extra deferral is needed here or wanted.
+    if (name === "mounted") {
+      // No native event object exists. `serializePayload("mounted", stub)`
+      // falls through to `{ kind: "empty" }` (the payload the contract
+      // specifies), and `preventDefault`/`stopPropagation` are optional on
+      // NativeEventLike, so host.ts's DomEvent tolerates their absence.
+      this.#sink(elementId, nameId, name, { type: "mounted" });
+      return;
+    }
+
     el.setAttribute(DIOXUS_ID_ATTR, String(elementId));
 
     let byName = this.#registrations.get(elementId);

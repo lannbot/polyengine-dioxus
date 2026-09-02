@@ -1,9 +1,9 @@
 // Serialization of host->guest `handle-event` entries.
 //
 // The host may only enter the guest component instance when no guest
-// activation is live. There are TWO windows in which a naive, synchronous
-// dispatch from a DOM listener would violate that, and both are reachable
-// from ordinary app code:
+// activation is live. There are THREE windows in which a naive, synchronous
+// dispatch from a DOM listener would violate that, and all three are
+// reachable from ordinary app code:
 //
 //   1. A `handle-event` call is in flight. The guest's own synchronous DOM
 //      mutations (issued mid-call, before the call's promise settles — e.g.
@@ -25,6 +25,16 @@
 //      a native event fired by the mutation itself would enter the guest
 //      from inside a live turn — the same trap, with nothing "in flight"
 //      by the window-1 bookkeeping.
+//
+//   3. A host IMPORT invoked by the guest. `dom.set-focus` (wit/world.wit,
+//      `interface dom`) runs host code while the guest that called it is
+//      still on the stack, and `.focus()`/`.blur()` fire `focusout`/
+//      `focusin` SYNCHRONOUSLY — delegated events this host would otherwise
+//      dispatch straight back into that same live activation. Same class as
+//      window 2 (host code running inside a guest turn), reached from the
+//      other direction. The mechanism is unchanged: host.ts's `setFocus`
+//      brackets its body with `beginApply`/`endApply`, so dispatches raised
+//      by the focus change queue and drain once the guest's turn unwinds.
 //
 // Window 2 is also forbidden outright by contract, independently of the
 // trap: .deps/polyengine/contracts/embedder-api.md amendment A21 ("Streams
@@ -54,17 +64,21 @@
 
 /**
  * Serializes guest entries so that at most one is live and none is attempted
- * inside a forbidden window (see the module comment: in-flight call, or
- * mutation application inside the direct-read callback).
+ * inside a forbidden window (see the module comment: in-flight call,
+ * mutation application inside the direct-read callback, or a host import
+ * running inside the calling guest's turn).
  *
  * Pure logic — no DOM, no runtime imports — so the ordering rules can be
- * unit-tested directly. The host wraps mutation application in
- * `beginApply`/`endApply` and routes every DOM event through `dispatch`.
+ * unit-tested directly. The host wraps mutation application AND the bodies
+ * of guest-invoked imports in `beginApply`/`endApply`, and routes every DOM
+ * event through `dispatch`.
  */
 export class DispatchGate {
   /** A guest `handle-event` call is in flight (its promise is unsettled). */
   #busy = false;
-  /** Inside the direct-read `consume` callback (mutation application). */
+  /** Inside a host-code window that runs within a live guest turn: the
+   * direct-read `consume` callback (mutation application), or the body of
+   * a host import the guest called. */
   #applying = false;
   #disposed = false;
   /** Captured guest-entry thunks, drained FIFO. */
@@ -86,7 +100,8 @@ export class DispatchGate {
    * `endApply` is called from the `finally` inside the direct-read callback,
    * which is still on the guest's rendezvous stack — the instance is not
    * enterable until that turn unwinds. An empty JS stack is the observable
-   * proxy for "no live guest turn" (module comment). */
+   * proxy for "no live guest turn" (module comment). The same holds for a
+   * host import's `finally`: it runs inside the caller's turn. */
   endApply(): void {
     this.#applying = false;
     if (this.#pending.length > 0) queueMicrotask(() => this.#drain());

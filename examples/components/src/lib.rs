@@ -25,11 +25,16 @@
 //!
 //! Structural ids referenced by the e2e harness (see the dispatch): the root
 //! `#showcase`, `#demo-button` / `#click-count`, `#checkbox-state`,
-//! `#demo-accordion`, `#demo-tooltip-trigger` / `#demo-tooltip`, and
-//! `#demo-dialog-open` / `#demo-dialog` / `#demo-dialog-close`.
+//! `#demo-accordion`, `#demo-tooltip-trigger` / `#demo-tooltip`,
+//! `#demo-dialog-open` / `#demo-dialog` / `#demo-dialog-close`, and the
+//! MountedData section's `#demo-scrollbox` / `#demo-measure` /
+//! `#demo-scroll` with its readouts `#rect-width` / `#rect-height` /
+//! `#scroll-height` / `#scroll-top`, plus `#demo-scroll-into-view` /
+//! `#scroll-to-status` / `#demo-scroll-target`.
 
 mod jsfree;
 
+use dioxus::html::geometry::PixelsVector2D;
 use dioxus::prelude::*;
 use dioxus_components::{
     Accordion, AccordionContent, AccordionItem, AccordionTrigger, AccordionType, Avatar,
@@ -37,11 +42,31 @@ use dioxus_components::{
     CardHeader, CardTitle, CheckboxIndicator, CheckboxProvider, CheckboxTrigger, CheckedState,
     Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyTitle, Spinner, SpinnerSize,
 };
+use std::rc::Rc;
+
+/// Sentinel for "no measurement taken yet", so the e2e lane can tell an
+/// unmeasured field from a genuine zero (`#scroll-top` legitimately reads 0
+/// before the box is scrolled).
+const UNMEASURED: i64 = -1;
+/// Sentinel for "the `MountedResult` came back `Err`". Rendered instead of
+/// leaving a stale value, so a failed query is visible in the UI and fails
+/// the test rather than passing quietly on the previous reading.
+const QUERY_FAILED: i64 = -2;
 
 fn app() -> Element {
     let mut count = use_signal(|| 0i32);
     let mut checkbox_state = use_signal(|| CheckedState::Unchecked);
     let mut dialog_open = use_signal(|| false);
+
+    // MountedData section state: the handle for #demo-scrollbox, captured at
+    // onmounted, plus one signal per rendered measurement.
+    let mut scrollbox: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+    let mut rect_width = use_signal(|| UNMEASURED);
+    let mut rect_height = use_signal(|| UNMEASURED);
+    let mut scroll_height = use_signal(|| UNMEASURED);
+    let mut scroll_top = use_signal(|| UNMEASURED);
+    let mut scroll_target: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
+    let mut scroll_to_status = use_signal(|| "scroll-to-idle");
 
     rsx! {
         div { id: "showcase", class: "p-6 flex flex-col gap-8",
@@ -138,6 +163,143 @@ fn app() -> Element {
                     panel_id: "demo-dialog",
                     close_id: "demo-dialog-close",
                     p { "Dialog body" }
+                }
+            }
+
+            section {
+                h2 { "MountedData (element queries)" }
+                // Exercises the five non-focus `RenderedElementBacking`
+                // methods against a real layout engine. The host-side unit
+                // tests run under linkedom, which has no layout at all, so
+                // "width > 0" is an assertion only a real browser can make —
+                // and this is also the only coverage of the record/enum
+                // conversions (rect/size/point, ScrollBehavior) across the
+                // guest -> host -> guest round trip.
+                div { class: "flex flex-col gap-2 items-start",
+                    div {
+                        id: "demo-scrollbox",
+                        // Fixed height + overflow-y:auto so scroll size
+                        // genuinely exceeds client size; 20 rows overflow it.
+                        class: "h-24 w-64 overflow-y-auto rounded-md border p-2 text-sm",
+                        onmounted: move |evt| scrollbox.set(Some(evt.data())),
+                        for i in 0..20 {
+                            div { key: "{i}", class: "py-0.5", "Row {i}" }
+                        }
+                    }
+                    div { class: "flex gap-2",
+                        button {
+                            id: "demo-measure",
+                            class: "rounded-md border px-3 py-1.5 text-sm",
+                            onclick: move |_| {
+                                let Some(data) = scrollbox.peek().clone() else { return };
+                                spawn(async move {
+                                    // Each query is awaited and reported
+                                    // independently: one failing method must
+                                    // not mask the others' results.
+                                    match data.get_client_rect().await {
+                                        Ok(rect) => {
+                                            rect_width.set(rect.size.width.round() as i64);
+                                            rect_height.set(rect.size.height.round() as i64);
+                                        }
+                                        Err(_) => {
+                                            rect_width.set(QUERY_FAILED);
+                                            rect_height.set(QUERY_FAILED);
+                                        }
+                                    }
+                                    match data.get_scroll_size().await {
+                                        Ok(size) => scroll_height.set(size.height.round() as i64),
+                                        Err(_) => scroll_height.set(QUERY_FAILED),
+                                    }
+                                    match data.get_scroll_offset().await {
+                                        Ok(offset) => scroll_top.set(offset.y.round() as i64),
+                                        Err(_) => scroll_top.set(QUERY_FAILED),
+                                    }
+                                });
+                            },
+                            "Measure"
+                        }
+                        button {
+                            id: "demo-scroll",
+                            class: "rounded-md border px-3 py-1.5 text-sm",
+                            onclick: move |_| {
+                                let Some(data) = scrollbox.peek().clone() else { return };
+                                spawn(async move {
+                                    // `scroll` is absolute (host side maps it
+                                    // to `el.scrollTo({top, left, behavior})`),
+                                    // so this parks scrollTop at 120.
+                                    // `Instant`, not `Smooth`: a smooth scroll
+                                    // animates asynchronously and the
+                                    // follow-up measurement would race it.
+                                    if data
+                                        .scroll(PixelsVector2D::new(0.0, 120.0), ScrollBehavior::Instant)
+                                        .await
+                                        .is_err()
+                                    {
+                                        scroll_top.set(QUERY_FAILED);
+                                    }
+                                });
+                            },
+                            "Scroll down"
+                        }
+                    }
+                    // Bare integers only — the e2e lane parses these with
+                    // Number(textContent).
+                    dl { class: "grid grid-cols-2 gap-x-4 text-sm",
+                        dt { "client rect width" }
+                        dd { id: "rect-width", "{rect_width}" }
+                        dt { "client rect height" }
+                        dd { id: "rect-height", "{rect_height}" }
+                        dt { "scroll height" }
+                        dd { id: "scroll-height", "{scroll_height}" }
+                        dt { "scroll top" }
+                        dd { id: "scroll-top", "{scroll_top}" }
+                    }
+
+                    // `scroll_to` is the conversion-heaviest method on the
+                    // trait: its `ScrollToOptions` carries three enums, two
+                    // of them the same type in different fields. The
+                    // `vertical`/`horizontal` values below are deliberately
+                    // DIFFERENT (Start vs Nearest) — with matching values, a
+                    // conversion that transposed or collapsed the two fields
+                    // would produce identical behaviour and hide the bug.
+                    button {
+                        id: "demo-scroll-into-view",
+                        class: "rounded-md border px-3 py-1.5 text-sm",
+                        onclick: move |_| {
+                            let Some(data) = scroll_target.peek().clone() else { return };
+                            spawn(async move {
+                                // `MountedData::scroll_to` only takes a
+                                // behavior and defaults the rest; the full
+                                // record (the thing worth exercising) goes
+                                // through `scroll_to_with_options`.
+                                let options = ScrollToOptions {
+                                    // Instant, so the assertion that follows
+                                    // is not racing a smooth-scroll animation.
+                                    behavior: ScrollBehavior::Instant,
+                                    vertical: ScrollLogicalPosition::Start,
+                                    horizontal: ScrollLogicalPosition::Nearest,
+                                };
+                                scroll_to_status.set(match data.scroll_to_with_options(options).await {
+                                    Ok(()) => "scroll-to-ok",
+                                    Err(_) => "scroll-to-failed",
+                                });
+                            });
+                        },
+                        "Scroll target into view"
+                    }
+                    span { id: "scroll-to-status", class: "text-sm", "{scroll_to_status}" }
+
+                    // The scroll_to target. `mt-[120vh]` pushes it at least a
+                    // full viewport below the section regardless of window
+                    // size, so "off-screen at load" is guaranteed rather than
+                    // dependent on how tall the rest of the gallery happens
+                    // to render.
+                    div {
+                        id: "demo-scroll-target",
+                        class: "mt-[120vh] rounded-md border p-2 text-sm",
+                        onmounted: move |evt| scroll_target.set(Some(evt.data())),
+                        "Scroll target"
+                    }
                 }
             }
 

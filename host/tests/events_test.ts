@@ -457,3 +457,88 @@ Deno.test("serializePayload: previously-misclassified names map to their real fa
   assertEquals(kindOf("lostpointercapture"), "pointer");
   assertEquals(kindOf("auxclick"), "pointer");
 });
+
+// -- synthetic `mounted` -----------------------------------------------------
+//
+// wit/world.wit (`handle-event`): `mounted` is SYNTHETIC — no such DOM event
+// exists, so the host fires it itself, once per registration, with an
+// `empty` payload.
+
+Deno.test("mounted: registration synthesizes exactly one dispatch, no native listener", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("div");
+  root.appendChild(el);
+
+  let nativeAdds = 0;
+  const realAdd = el.addEventListener.bind(el);
+  el.addEventListener = (...args: Parameters<typeof realAdd>) => {
+    nativeAdds++;
+    return realAdd(...args);
+  };
+  let rootAdds = 0;
+  const realRootAdd = root.addEventListener.bind(root);
+  root.addEventListener = (...args: Parameters<typeof realRootAdd>) => {
+    rootAdds++;
+    return realRootAdd(...args);
+  };
+
+  // event_bubbles("mounted") is false, so it arrives as a non-bubbling add.
+  dispatcher.add(el, 7, 42, "mounted", false);
+
+  assertEquals(nativeAdds, 0, "no native listener for a synthetic event");
+  assertEquals(rootAdds, 0, "and none delegated at the root either");
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].elementId, 7);
+  assertEquals(calls[0].nameId, 42);
+  assertEquals(calls[0].name, "mounted");
+  assertEquals(serializePayload("mounted", { type: "mounted" }), { kind: "empty" });
+});
+
+Deno.test("mounted: fires once per registration, not again on later events", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const el = document.createElement("button");
+  root.appendChild(el);
+
+  dispatcher.add(el, 1, 42, "mounted", false);
+  assertEquals(calls.length, 1);
+
+  // A real event on the same element dispatches on its own registration and
+  // does not re-trigger `mounted`.
+  dispatcher.add(el, 1, 10, "click", true);
+  el.dispatchEvent(new document.defaultView!.Event("click", { bubbles: true }));
+  assertEquals(calls.length, 2);
+  assertEquals(calls[1].name, "click");
+
+  // `mounted` is not a resolvable dispatch target: no native event carries
+  // that name, and it is deliberately absent from #registrations.
+  dispatcher.dispatchTo(el, "mounted", { type: "mounted" });
+  assertEquals(calls.length, 2);
+
+  // purge/dispose must not break on an element that registered `mounted`.
+  dispatcher.purge(1, el);
+  dispatcher.dispose();
+  assertEquals(calls.length, 2);
+});
+
+Deno.test("mounted: each element gets its own single dispatch", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  const a = document.createElement("div");
+  const b = document.createElement("div");
+  root.appendChild(a);
+  root.appendChild(b);
+
+  dispatcher.add(a, 1, 42, "mounted", false);
+  dispatcher.add(b, 2, 42, "mounted", false);
+
+  assertEquals(calls.length, 2);
+  assertEquals(calls.map((c) => c.elementId), [1, 2]);
+});
