@@ -4,6 +4,7 @@
     "@deltic/runtime/shim": "./.deps/polyengine/runtime/src/shim/mod.ts",
     "@deltic/protocol": "./.deps/polyengine/protocol/src/mod.ts",
     "@deltic/translator": "./.deps/polyengine/translator/mod.ts",
+    "@polyengine/wasi": "./.deps/polyengine/wasi/src/mod.ts",
     "linkedom": "npm:linkedom@0.18.12"
   },
   "compilerOptions": {

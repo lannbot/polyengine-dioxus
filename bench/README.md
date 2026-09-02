@@ -16,8 +16,8 @@ deno task bench
 ```
 
 Builds `examples/bench-rows` into `bench/build/` (replicating `justfile`'s
-`example` recipe's two commands — `cargo build --release
---target wasm32-unknown-unknown` then `wasm-tools component new`), then
+`example` recipe's build command — `cargo build --release
+--target wasm32-wasip2`, which emits a component directly), then
 runs `bench/bench.ts`.
 
 Output: a markdown table to stdout, written to

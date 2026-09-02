@@ -28,5 +28,6 @@ dioxus_components = { version = "=0.1.2", default-features = false }
 # happen and the crate fails to compile without these features enabled here
 # ourselves. (The dialog/portal/tooltip code is never called from this
 # example — see src/lib.rs's header — so these are dead-code JS-boundary
-# imports that LTO strips / wbg-sever severs; they just need to typecheck.)
+# code on wasm32-wasip2, where wasm-bindgen emits no imports at all; they
+# just need to typecheck.)
 web-sys = { version = "0.3", features = ["Window", "Document", "KeyboardEvent"] }

@@ -133,7 +133,7 @@ test("components example: gallery mounts, button/checkbox/accordion interactions
 
 // JS-free Dialog/Tooltip adaptations (examples/components/src/jsfree.rs).
 // These replace the upstream dioxus_components Dialog/Tooltip, which trap
-// under this renderer once wbg-sever has removed the JS imports. The point
+// under this renderer, where wasm-bindgen has no working implementation. The point
 // of this test is that the replacements are real browser behaviour, not
 // just compiling code: CSS-driven tooltip visibility, and a dialog whose
 // escape/backdrop/close paths all run through plain Dioxus handlers.

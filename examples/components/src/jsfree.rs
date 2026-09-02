@@ -1,6 +1,7 @@
 //! JS-free adaptations of `dioxus_components` 0.1.2's Dialog and Tooltip,
 //! written for this renderer. The upstream components are unusable here:
-//! `wbg-sever` strips this component's wasm-bindgen imports, so every
+//! the guest is built for wasm32-wasip2, where wasm-bindgen compiles to
+//! stubs that abort rather than emitting imports, so every
 //! `js_sys` / `web_sys` call in them traps at runtime. Rather than drop the
 //! behaviours, the two below re-derive them from plain Dioxus event
 //! handlers plus CSS.
