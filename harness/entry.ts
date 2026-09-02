@@ -48,6 +48,7 @@ interface HarnessError {
 const APP_CSS: Record<string, string> = {
   todomvc: "./todomvc.css",
   components: "./components.css",
+  primitives: "./primitives.css",
 };
 
 // Per-app selector that indicates the initial render has landed (waited
@@ -55,6 +56,7 @@ const APP_CSS: Record<string, string> = {
 const APP_MOUNTED_SELECTOR: Record<string, string> = {
   todomvc: ".todoapp",
   components: "#showcase",
+  primitives: "#primitives-showcase",
 };
 
 const errors: HarnessError[] = [];

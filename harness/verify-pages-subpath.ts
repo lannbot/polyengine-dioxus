@@ -140,6 +140,60 @@ try {
     }
 
     console.log("PASS: subpath components probe (#showcase renders, #demo-button click works, zero errors)");
+
+    // Primitives demo, same subpath + browser instance (dispatch: "wiring
+    // the `primitives` example into the harness/pages assembly").
+    const primitivesPageErrors: string[] = [];
+    page.on("pageerror", (err) => primitivesPageErrors.push(err.stack ?? err.message));
+    const primitivesConsoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") primitivesConsoleErrors.push(msg.text());
+    });
+
+    await page.goto(`${baseUrl}?app=primitives`);
+    await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+      timeout: 15_000,
+    });
+
+    const primitivesMountFailed = await page.evaluate(
+      () => (globalThis as unknown as { __mountFailed?: boolean }).__mountFailed,
+    );
+    if (primitivesMountFailed) throw new Error("primitives: mountApp failed (window.__mountFailed is true)");
+
+    const primitivesShowcaseCount = await page.locator("#primitives-showcase").count();
+    if (primitivesShowcaseCount === 0) throw new Error("primitives: #primitives-showcase not found");
+
+    const switchStateEl = page.locator("#switch-state");
+    const initialSwitchState = (await switchStateEl.textContent())?.trim();
+    if (initialSwitchState !== "on" && initialSwitchState !== "off") {
+      throw new Error(`primitives: #switch-state must read "on" or "off", got ${JSON.stringify(initialSwitchState)}`);
+    }
+    // Selector is defensive (see e2e/tests/primitives.spec.ts's comment):
+    // dioxus_primitives::switch::Switch isn't fixed by the contract beyond
+    // living within #demo-switch.
+    const switchControl = page.locator('#demo-switch [role="switch"], #demo-switch button, #demo-switch [data-state]')
+      .first();
+    await switchControl.click();
+    await page.waitForFunction(
+      (prev) => document.querySelector("#switch-state")?.textContent?.trim() !== prev,
+      initialSwitchState,
+      { timeout: 5_000 },
+    );
+    const flippedState = (await switchStateEl.textContent())?.trim();
+    if (flippedState === initialSwitchState) {
+      throw new Error(`primitives: #switch-state did not flip after clicking the switch (still ${flippedState})`);
+    }
+
+    if (primitivesPageErrors.length > 0) {
+      throw new Error(`primitives: page errors: ${JSON.stringify(primitivesPageErrors)}`);
+    }
+    if (primitivesConsoleErrors.length > 0) {
+      throw new Error(`primitives: console errors: ${JSON.stringify(primitivesConsoleErrors)}`);
+    }
+
+    console.log(
+      "PASS: subpath primitives probe (#primitives-showcase renders, switch toggle flips #switch-state, zero errors)",
+    );
   } finally {
     await browser.close();
   }
