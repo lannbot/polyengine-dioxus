@@ -599,7 +599,7 @@ dependencies = [
 [[package]]
 name = "dioxus-sdk-time"
 version = "0.7.0"
-source = "git+https://github.com/lannbot/dioxus-sdk?branch=main#390acec245754a3ad54217a0b625ff121d2c95f2"
+source = "git+https://github.com/lannbot/dioxus-sdk?rev=390acec245754a3ad54217a0b625ff121d2c95f2#390acec245754a3ad54217a0b625ff121d2c95f2"
 dependencies = [
  "dioxus",
  "futures",

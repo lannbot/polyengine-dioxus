@@ -47,8 +47,13 @@ members = [".", "fixtures/surface-probe", "examples/counter", "examples/bench-ro
 # `wasi:clocks/monotonic-clock` instead — an interface this host already
 # provides (.deps/polyengine/wasi/src/clocks.ts serves the @0.3 track,
 # `waitFor` included). Upstream PR pending; drop this patch once it lands.
+#
+# Pinned to a rev, not tracking `main`: this is a fork we can push to, so a
+# branch reference would let a push there silently change what everyone
+# builds — the same reason dioxus-primitives is pinned below and the dioxus
+# crates take `=` versions.
 [patch.crates-io]
-dioxus-sdk-time = { git = "https://github.com/lannbot/dioxus-sdk", branch = "main" }
+dioxus-sdk-time = { git = "https://github.com/lannbot/dioxus-sdk", rev = "390acec245754a3ad54217a0b625ff121d2c95f2" }
 
 [profile.release]
 opt-level = "s"
