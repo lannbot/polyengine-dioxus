@@ -13,14 +13,17 @@
 /// any change to opcodes, operand layouts, or framing bumps the package
 /// version (instantiation is digest-checked, so a mismatch fails loudly and
 /// early).
-package polymorph:dioxus@0.1.0;
+package polymorph:dioxus@0.2.0;
 
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
 /// construction (the family is chosen host-side by event name, mirroring
 /// dioxus-html's name→data-type mapping). Families not yet covered
-/// (drag/touch/composition/animation/media specifics, onmounted) dispatch
-/// as `empty` in this version.
+/// (drag/touch/composition/animation/media specifics) dispatch as `empty`
+/// in this version. `onmounted` also carries an `empty` payload, but is
+/// not "uncovered": its handler's value is the `MountedData` handle the
+/// guest builds from the dispatch's `target`, backed by the `dom`
+/// interface below.
 ///
 /// Also home to the host-implemented `dom-event` resource — the live-event
 /// handle lent to `handle-event`.
@@ -127,6 +130,84 @@ interface events {
   }
 }
 
+/// Operations on live elements the guest cannot express declaratively.
+///
+/// Everything else in this world flows one way: the guest describes DOM
+/// mutations and the host applies them. A few things resist that shape —
+/// "which element has focus" is browser state, not a property of the tree
+/// the guest rendered; "how tall is this element" is a layout answer that
+/// only exists after the browser has laid it out — so they need a
+/// request/response import instead. This interface is the home for those.
+///
+/// These back dioxus-html's `MountedData` (its `RenderedElementBacking`
+/// trait, dioxus-html-0.7.10 src/events/mounted.rs:13-55), whose handle the
+/// guest obtains from an `onmounted` event. The trait's six methods are
+/// covered here in full: this renderer is a library, so a method left
+/// unimplemented is not a local simplification, it is a `NotSupported` that
+/// surfaces at runtime in somebody else's app.
+///
+/// Convention: queries return `option` (none = no live node holds that id),
+/// commands return `bool` (false = same). Every operation takes `target`,
+/// the ElementId the guest assigned in a prior mutation batch; ids are
+/// reused slab indices, so a handle an app stashed can outlive its element
+/// and the miss case is ordinary, not exceptional.
+///
+/// All synchronous: each maps to one synchronous DOM call (a smooth scroll
+/// is dispatched synchronously and animates afterwards), and a sync import
+/// spares the guest an await inside an event handler.
+interface dom {
+  /// A position or displacement in CSS pixels.
+  record point { x: f64, y: f64 }
+
+  /// A 2D extent in CSS pixels.
+  record size { width: f64, height: f64 }
+
+  /// An axis-aligned box in CSS pixels: origin plus extent.
+  record rect { x: f64, y: f64, width: f64, height: f64 }
+
+  /// dioxus-html `ScrollBehavior`; the DOM's `ScrollBehavior`.
+  enum scroll-behavior { instant, smooth }
+
+  /// dioxus-html `ScrollLogicalPosition`; the DOM's `block`/`inline`
+  /// alignment for `scrollIntoView`.
+  enum scroll-alignment { start, center, end, nearest }
+
+  /// dioxus-html `ScrollToOptions`. `vertical`/`horizontal` are the DOM's
+  /// `block`/`inline` respectively.
+  record scroll-to-options {
+    behavior: scroll-behavior,
+    vertical: scroll-alignment,
+    horizontal: scroll-alignment,
+  }
+
+  /// How far the element's content is scrolled (`scrollLeft`/`scrollTop`).
+  get-scroll-offset: func(target: u32) -> option<point>;
+
+  /// The size of the element's content including the part overflowing the
+  /// visible box (`scrollWidth`/`scrollHeight`).
+  get-scroll-size: func(target: u32) -> option<size>;
+
+  /// The element's bounding box relative to the viewport, excluding scroll
+  /// position (`getBoundingClientRect`).
+  get-client-rect: func(target: u32) -> option<rect>;
+
+  /// Scroll the element into view (`scrollIntoView`).
+  scroll-to: func(target: u32, options: scroll-to-options) -> bool;
+
+  /// Scroll the element's own content to `offset` (`scrollTo`).
+  scroll: func(target: u32, offset: point, behavior: scroll-behavior) -> bool;
+
+  /// Focus (or blur) the element.
+  ///
+  /// NOTE for host implementors: `.focus()` fires `focusout`/`focusin`
+  /// SYNCHRONOUSLY on the elements involved, and those are delegated events
+  /// the host would otherwise dispatch straight back into a guest that is
+  /// still on the stack inside this very call. The host must defer such
+  /// dispatches (see the guest-entry serialization in
+  /// host/src/dispatch.ts).
+  set-focus: func(target: u32, focus: bool) -> bool;
+}
+
 /// A Dioxus application component. The host instantiates it, calls `run`
 /// once — which returns the mutation stream the app renders through — and
 /// dispatches DOM events via `handle-event`.
@@ -134,6 +215,7 @@ world app {
   use events.{payload, dom-event};
 
   import events;
+  import dom;
 
   /// Start the app and return the mutation channel: the host receives the
   /// read end, parks a direct-read session on it for the life of the
@@ -279,7 +361,17 @@ world app {
 
   /// Dispatch one DOM event to the listener registered on `target` (the
   /// ElementId carried by new-event-listener) for the interned event name
-  /// `name`. The guest runs matching handlers synchronously (Dioxus
+  /// `name`.
+  ///
+  /// The name `mounted` is SYNTHETIC: no such DOM event exists, and the
+  /// host must fire it itself, once, for each element that registered a
+  /// `mounted` listener — after the batch that created the element has
+  /// been fully applied, so the node is in the document and the handler's
+  /// `MountedData` queries see a real element. dioxus-core registers it
+  /// like any other listener (`event_bubbles("mounted")` is false), which
+  /// is why it arrives here rather than through a separate export. Its
+  /// payload is `empty`; what the handler actually wants is `target`,
+  /// which is the handle the `dom` interface's operations take. The guest runs matching handlers synchronously (Dioxus
   /// synthetic bubbling included) and, if a handler prevented the default,
   /// calls `ev.prevent-default()` before returning. Renders triggered by
   /// the event flush through the mutation channel (same task or the

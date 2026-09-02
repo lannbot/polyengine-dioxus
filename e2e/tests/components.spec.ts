@@ -182,23 +182,31 @@ test("components example: JS-free tooltip and dialog behave in a real browser", 
   const openBtn = page.locator("#demo-dialog-open");
   await expect(dialog).toHaveCount(0);
 
-  // Open.
+  // Open. Initial focus lands on the close button with no user action:
+  // the button's `onmounted` handler calls MountedData::set_focus, backed
+  // by the `dom.set-focus` import (wit/world.wit). No Tab, no autofocus.
   await openBtn.click();
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("Dialog body");
-
-  // Escape closes (plain onkeydown on the panel, replacing upstream's
-  // document-level listener). The Tab first is not test scaffolding, it is
-  // the gap: `autofocus` on the close button does not place initial focus,
-  // because the HTML spec ignores autofocus candidates once a document has
-  // finished loading (verified here against a plain
-  // `document.body.appendChild(<button autofocus>)` control, which also
-  // does not focus — so this is the browser, not the renderer). With no
-  // imperative focus available (MountedData is NotSupported) the handler
-  // can only see keys once focus is inside the dialog, which Tab does:
-  // the close button is the next tabbable element after the open button.
-  await page.keyboard.press("Tab");
   await expect(page.locator("#demo-dialog-close")).toBeFocused();
+
+  // Tab trap: focus cannot leave the dialog. Tabbing off the last control
+  // lands on an sr-only focus guard whose onfocusin bounces focus back
+  // inside, so every one of these presses leaves activeElement within
+  // #demo-dialog (the guards are inside the panel too).
+  for (let i = 0; i < 4; i++) {
+    await page.keyboard.press("Tab");
+    const inside = await page.evaluate(() => document.activeElement?.closest("#demo-dialog") !== null);
+    expect(inside, `focus escaped #demo-dialog after Tab #${i + 1}`).toBe(true);
+  }
+
+  // Backwards too — this is the leading guard, which the forward loop
+  // above never reaches (focus cycles close -> trailing guard -> close).
+  await page.keyboard.press("Shift+Tab");
+  await expect(page.locator("#demo-dialog-close")).toBeFocused();
+
+  // Escape closes. No Tab needed first: focus has been inside the dialog
+  // since it opened.
   await page.keyboard.press("Escape");
   await expect(dialog).toHaveCount(0);
 
@@ -221,4 +229,160 @@ test("components example: JS-free tooltip and dialog behave in a real browser", 
   expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
   expect(pageErrors, "no uncaught page exceptions").toEqual([]);
   expect(consoleErrors, "no console.error output").toEqual([]);
+});
+
+// MountedData round trip against a real layout engine.
+//
+// The five non-focus RenderedElementBacking methods (get_client_rect,
+// get_scroll_size, get_scroll_offset, scroll, scroll_to) are covered
+// host-side by unit tests running under linkedom, which has no layout
+// engine — there, every box is zero-sized and nothing scrolls. So the
+// assertions below (a width that is actually > 0, a scroll size that
+// actually exceeds the client size, a scrollTop that actually moves) are
+// the only proof that the guest -> host -> guest round trip works, record
+// and enum conversions included.
+test("components example: MountedData queries round-trip through real layout", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() !== "error") return;
+    const text = msg.text();
+    if (BENIGN_CONSOLE_PATTERNS.some((re) => re.test(text))) return;
+    consoleErrors.push(text);
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (err) => pageErrors.push(err.stack ?? err.message));
+
+  await page.goto(baseUrl());
+  await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+    timeout: 15_000,
+  });
+  await expect(page.locator("#showcase")).toBeVisible();
+
+  const rectWidth = page.locator("#rect-width");
+  const rectHeight = page.locator("#rect-height");
+  const scrollHeight = page.locator("#scroll-height");
+  const scrollTop = page.locator("#scroll-top");
+  const num = async (loc: typeof rectWidth) => Number(await loc.textContent());
+
+  // -1 is the example's "not measured yet" sentinel; -2 is "MountedResult
+  // came back Err". Starting from -1 is what keeps a genuine 0 (the
+  // unscrolled scrollTop) distinguishable from a query that never ran.
+  await expect(page.locator("#demo-scrollbox")).toBeVisible();
+  for (const loc of [rectWidth, rectHeight, scrollHeight, scrollTop]) {
+    await expect(loc).toHaveText("-1");
+  }
+
+  // Measure.
+  await page.locator("#demo-measure").click();
+  await expect(rectWidth).not.toHaveText("-1");
+  await expect(scrollTop).not.toHaveText("-1");
+
+  const w = await num(rectWidth);
+  const h = await num(rectHeight);
+  const sh = await num(scrollHeight);
+  const st0 = await num(scrollTop);
+  console.log(`measured: rect ${w}x${h}, scrollHeight ${sh}, scrollTop ${st0}`);
+
+  // Real layout: a bordered 16rem x 6rem box has a nonzero client rect.
+  expect(w, "client rect width must be real layout, not linkedom's zero").toBeGreaterThan(0);
+  expect(h, "client rect height must be real layout, not linkedom's zero").toBeGreaterThan(0);
+  // 20 rows in a fixed-height box: the content genuinely overflows.
+  expect(sh, "scroll height must exceed client height (content overflows)").toBeGreaterThan(h);
+  // Not scrolled yet.
+  expect(st0, "scroll offset starts at 0").toBe(0);
+
+  // Mutating op with an enum operand (ScrollBehavior::Instant), then
+  // re-measure: the scroll actually took effect in the DOM.
+  await page.locator("#demo-scroll").click();
+  await page.locator("#demo-measure").click();
+  await expect(scrollTop).not.toHaveText(String(st0));
+  const st1 = await num(scrollTop);
+  console.log(`after scroll: scrollTop ${st1}`);
+  expect(st1, "scroll(0, 120) must move the box's scrollTop").toBeGreaterThan(0);
+
+  // No MountedResult errors anywhere.
+  for (const loc of [rectWidth, rectHeight, scrollHeight, scrollTop]) {
+    expect(Number(await loc.textContent()), "no field may report the -2 query-failed sentinel").not.toBe(-2);
+  }
+
+  const collectedErrors = await page.evaluate(() =>
+    (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
+  );
+  expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
+  expect(pageErrors, "no uncaught page exceptions").toEqual([]);
+  expect(consoleErrors, "no console.error output").toEqual([]);
+});
+
+// scroll_to (the scrollIntoView wrapper) — a sibling test rather than an
+// extension of the one above, because it asserts window.scrollY === 0 at
+// the start and Playwright's click auto-scrolling would have already moved
+// the page by the end of the measurement test.
+//
+// This is the conversion-heaviest method on RenderedElementBacking: its
+// ScrollToOptions carries three enum values, two of which are the same type
+// (ScrollLogicalPosition) in different fields. The example passes Start for
+// `vertical` and Nearest for `horizontal` deliberately — with equal values
+// a conversion that transposed or collapsed the fields would behave
+// identically and prove nothing.
+test("components example: scroll_to brings an off-screen element into view", async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on("pageerror", (err) => pageErrors.push(err.stack ?? err.message));
+
+  await page.goto(baseUrl());
+  await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+    timeout: 15_000,
+  });
+  await expect(page.locator("#showcase")).toBeVisible();
+
+  const status = page.locator("#scroll-to-status");
+  const target = page.locator("#demo-scroll-target");
+  await expect(status).toHaveText("scroll-to-idle");
+
+  const viewport = page.viewportSize();
+  if (!viewport) throw new Error("no viewport size (headless run should always have one)");
+
+  // Geometry, not isVisible(): Playwright counts an off-screen-but-rendered
+  // element as visible, so only the bounding box can establish that the
+  // target starts outside the viewport.
+  const scrollYBefore = await page.evaluate(() => window.scrollY);
+  const boxBefore = await target.boundingBox();
+  if (!boxBefore) throw new Error("#demo-scroll-target has no bounding box");
+  console.log(
+    `scroll_to before: scrollY ${scrollYBefore}, target box y=${Math.round(boxBefore.y)} ` +
+      `h=${Math.round(boxBefore.height)}, viewport h=${viewport.height}`,
+  );
+  expect(scrollYBefore, "page must start at the top").toBe(0);
+  expect(boxBefore.y, "target must start below the fold").toBeGreaterThan(viewport.height);
+
+  await page.locator("#demo-scroll-into-view").click();
+  await expect(status).toHaveText("scroll-to-ok");
+
+  const scrollYAfter = await page.evaluate(() => window.scrollY);
+  const boxAfter = await target.boundingBox();
+  if (!boxAfter) throw new Error("#demo-scroll-target lost its bounding box");
+  console.log(
+    `scroll_to after:  scrollY ${Math.round(scrollYAfter)}, target box y=${Math.round(boxAfter.y)} ` +
+      `h=${Math.round(boxAfter.height)}`,
+  );
+
+  expect(scrollYAfter, "scroll_to must have scrolled the page").toBeGreaterThan(0);
+  // Fully inside the viewport now.
+  expect(boxAfter.y, "target's top edge must be inside the viewport").toBeGreaterThanOrEqual(0);
+  expect(boxAfter.y + boxAfter.height, "target's bottom edge must be inside the viewport")
+    .toBeLessThanOrEqual(viewport.height);
+  // And specifically flush with the TOP of the viewport, which is what
+  // `vertical: Start` means. This is the assertion that discriminates the
+  // enum: Center would land the box near viewport.height / 2, End and
+  // Nearest (scrolling downward) near the bottom. It is therefore also what
+  // catches a vertical/horizontal transposition in the conversion — the
+  // example passes Nearest for `horizontal`, so a swap would show up here
+  // as a bottom-aligned box.
+  expect(boxAfter.y, "vertical: Start must align the target's top edge with the viewport top")
+    .toBeLessThanOrEqual(2);
+
+  const collectedErrors = await page.evaluate(() =>
+    (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
+  );
+  expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
+  expect(pageErrors, "no uncaught page exceptions").toEqual([]);
 });

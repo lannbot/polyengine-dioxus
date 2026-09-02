@@ -29,28 +29,52 @@
 //!      scroll chaining to the page (the common case) but does not stop a
 //!      wheel/touch scroll that starts outside the backdrop.
 //!   2. Focus trap (`querySelectorAll` for focusables + `.focus()` + Tab
-//!      interception) — **partly lost**. Imperative focus is unavailable:
-//!      this renderer reports `MountedData` as `NotSupported`, so there is
-//!      no handle to call `.set_focus()` on. `autofocus` on the close button
-//!      is the only non-imperative alternative and it does **not** work
-//!      here: the HTML spec ignores autofocus candidates once a document
-//!      has finished loading, so a dialog inserted by a later render never
-//!      takes focus. (Verified in Chromium against a plain
-//!      `document.body.appendChild(<button autofocus>)` control, which is
-//!      equally ignored — this is the browser, not the renderer.) The
-//!      attribute stays because nothing better exists. Consequences: focus
-//!      remains on whatever opened the dialog, Escape only fires once the
-//!      user has tabbed into the dialog, and Tab cycling within the dialog
-//!      is not attempted either, so Tab can walk back out into the page
-//!      behind it.
-//!   3. Escape-to-close (a `document`-level `keydown` listener) — a plain
-//!      `onkeydown` on the panel, faithful *while focus is inside the
-//!      dialog*. The panel carries `tabindex="-1"` so it can hold focus and
-//!      receive key events. Upstream's listener is on `document` and so
-//!      fires regardless of focus; a guest component cannot register
-//!      outside its own subtree, and point 2 means focus does not start
-//!      inside the dialog.
-//!   4. Backdrop click-to-close — faithful; upstream already used a plain
+//!      interception) — **working**, by a different construction. The
+//!      renderer now synthesizes the `mounted` event and backs
+//!      `MountedData::set_focus` with the `dom.set-focus` import
+//!      (wit/world.wit's `dom` interface; guest side src/events.rs:613-632),
+//!      so `onmounted` yields a handle that can move focus. Two pieces:
+//!        - *Initial focus*: the close button's `onmounted` calls
+//!          `set_focus(true)` on its own handle. (This replaces an
+//!          `autofocus` attribute that never fired — the HTML spec ignores
+//!          autofocus candidates once a document has finished loading, so
+//!          it was dead weight on a dialog inserted by a later render.)
+//!        - *Tab cycling*: two `tabindex="0"` focus guards bracket the
+//!          panel's content, `sr-only` so they are invisible but still in
+//!          the tab order (`display:none` / `visibility:hidden` would take
+//!          them out of it, which is why the clipping technique is the one
+//!          that works). Tabbing off either end lands on a guard, whose
+//!          `onfocusin` bounces focus back to a real control. `focusin` is
+//!          the name to hang this on: it is what the renderer delivers for
+//!          the DOM's own bubbling focus event
+//!          (`event_bubbles("focusin") == true`, so the host delegates it
+//!          at the mount root and resolves the guard by walking up from
+//!          `event.target`).
+//!        - *Fidelity boundary worth naming*: a `querySelectorAll`-based trap
+//!          wraps to the genuinely first/last focusable in the dialog. This one
+//!          can only wrap to controls the component itself owns, because
+//!          `children` is an opaque `Element` and there is no way to enumerate
+//!          the focusables inside it. The close button is the panel's last
+//!          control, so the leading guard's wrap (Shift-Tab off the top → last
+//!          control) is exact; the trailing guard's wrap (Tab off the bottom →
+//!          first control) also lands on the close button, where a DOM-querying
+//!          trap would have landed on the first focusable inside `children`.
+//!          Focus never escapes either way — the cycle is just shorter than
+//!          upstream's when `children` contains its own controls.
+//!   3. **Focus restoration on close** — **genuinely lost**, and it is the
+//!      one focus behaviour still missing. Restoring focus to whatever
+//!      opened the dialog means knowing what that was, i.e. reading
+//!      `document.activeElement` at open time; the `dom` interface has no
+//!      query operation and `MountedData` has no "am I focused". Nothing
+//!      here fakes it. Fixing it needs either a `dom` operation that
+//!      returns the focused element's ElementId (which the guest could
+//!      stash and `set-focus` back to), or a host-side save/restore pair.
+//!   4. Escape-to-close (a `document`-level `keydown` listener) — faithful.
+//!      A plain `onkeydown` on the panel, which now sees the key from the
+//!      first press onward because point 2 puts focus inside the dialog on
+//!      open and keeps it there. The panel carries `tabindex="-1"` so it
+//!      can hold focus and receive key events.
+//!   5. Backdrop click-to-close — faithful; upstream already used a plain
 //!      Dioxus `onclick` here. The panel calls `evt.stop_propagation()` so a
 //!      click inside it does not bubble to the backdrop's handler. That call
 //!      is load-bearing: the host dispatches an event to the nearest
@@ -73,6 +97,7 @@
 //! automatically and no separate stylesheet is needed.
 
 use dioxus::prelude::*;
+use std::rc::Rc;
 
 /// Hover/focus tooltip with no state and no event listeners: the `group`
 /// wrapper plus `group-hover:` / `group-focus-within:` variants do the
@@ -132,6 +157,9 @@ pub fn Dialog(
     if !open() {
         return rsx! {};
     }
+    // Handle to the close button, captured by its `onmounted`. Held in a
+    // signal because it is written by one handler and read by three others.
+    let mut close_handle: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     rsx! {
         div {
             // Fixed + inset-0 + a high z-index is the whole of what
@@ -154,26 +182,64 @@ pub fn Dialog(
                         open.set(false);
                     }
                 },
+                // Leading focus guard. Reached by Shift-Tab off the first
+                // control in the panel, or by Tab from anything before the
+                // dialog in document order; either way, bounce focus to the
+                // panel's last control. `sr-only` clips it to a 1px box
+                // rather than hiding it, which is what keeps it in the tab
+                // order at all.
+                span {
+                    class: "sr-only",
+                    tabindex: "0",
+                    onfocusin: move |_| focus_close(close_handle),
+                }
                 h3 { class: "mb-2 text-lg font-semibold", "{title}" }
                 div { class: "mb-4 text-sm", {children} }
                 button {
                     id: "{close_id}",
-                    // Does not actually take effect (see the module doc:
-                    // autofocus candidates are ignored after document load,
-                    // and `MountedData` is NotSupported so there is no
-                    // imperative `set_focus()` either). Kept because it is
-                    // the only non-imperative expression of the intent, and
-                    // it is what would start working if the renderer ever
-                    // exposed mounted handles.
-                    autofocus: true,
                     class: "rounded-md bg-neutral-900 px-3 py-1.5 text-sm text-white",
+                    // Initial focus, and the anchor both guards bounce to.
+                    // `mounted` is synthesized by the host after the batch
+                    // that created this node has been applied, so the node
+                    // is in the document by the time this runs.
+                    onmounted: move |evt| {
+                        close_handle.set(Some(evt.data()));
+                        focus_close(close_handle);
+                    },
                     onclick: move |evt| {
                         evt.stop_propagation();
                         open.set(false);
                     },
                     "Close"
                 }
+                // Trailing focus guard: Tab off the last control lands here
+                // and is sent back to the close button. See the module doc
+                // for why the wrap target is the close button rather than
+                // the genuinely-first focusable in the panel.
+                span {
+                    class: "sr-only",
+                    tabindex: "0",
+                    onfocusin: move |_| focus_close(close_handle),
+                }
             }
         }
     }
+}
+
+/// Move focus to the close button, if its `onmounted` has run.
+///
+/// `MountedData::set_focus` is async in dioxus-html's trait, so it has to be
+/// driven by a task even though this renderer's implementation resolves
+/// immediately (`dom.set-focus` is a synchronous import — src/events.rs:618).
+/// The result is dropped rather than propagated: the only failure mode is
+/// "no live node for that ElementId", which happens when a stashed handle
+/// outlives its element — a dialog that is closing is exactly that case, and
+/// there is nothing useful for a component to do about it. (Nowhere to log
+/// it either: this component has no JS boundary and the example pulls in no
+/// tracing subscriber.)
+fn focus_close(handle: Signal<Option<Rc<MountedData>>>) {
+    let Some(data) = handle.peek().clone() else { return };
+    spawn(async move {
+        let _ = data.set_focus(true).await;
+    });
 }

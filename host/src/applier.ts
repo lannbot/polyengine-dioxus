@@ -116,6 +116,21 @@ export class DomApplier implements OpSink {
     return n;
   }
 
+  /** Read-only lookup of the node currently bound to an ElementId, or
+   * `undefined` when no node holds that id.
+   *
+   * This is the backing for the `dom` interface's element handles
+   * (wit/world.wit `interface dom`): the guest's `MountedData` carries an
+   * ElementId, and every host-side operation on it starts by resolving
+   * that id here. A miss is legal and expected — ids are reused slab
+   * indices, so a handle the app stashed can outlive its element — hence
+   * `undefined` rather than the throwing `#getNode`. Deliberately narrow:
+   * the node ARRAY stays private, so nothing outside can mutate the table
+   * behind the applier's purge-on-reuse bookkeeping. */
+  nodeFor(id: number): Node | undefined {
+    return this.#nodes[id];
+  }
+
   #setNode(id: number, node: Node): void {
     // Id reuse is the reliable unmount signal: dioxus frees an ElementId
     // before reassigning it, and never emits remove-event-listener ops for
