@@ -98,9 +98,12 @@ Deno.test("counter example: mount, click, type, list, form submit", async () => 
   const translator = await defaultTranslator();
 
   const errors: unknown[] = [];
+  // Untranslated form of `InstantiateSource` (embedder-api.md A3): this is
+  // a Deno test, not a deploy, so translating in-process keeps it
+  // independent of `just example`'s envelope step — and exercises the arm
+  // of `InstantiateSource` the harness/Pages build (A4 envelope) doesn't.
   const mounted = await mountApp({
-    componentBytes,
-    translator,
+    source: { componentBytes, translator },
     root,
     onError: (err) => errors.push(err),
   });

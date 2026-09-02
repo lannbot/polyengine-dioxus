@@ -4,24 +4,19 @@
 //
 // Emits harness/dist/ (gitignored — see repo .gitignore's unanchored
 // `dist/` pattern):
-//   - entry.js               — `deno bundle --platform browser` output of
-//                               harness/entry.ts (same mechanism
+//   - entry.js               — `deno bundle --platform browser --minify`
+//                               output of harness/entry.ts (same mechanism
 //                               .deps/polyengine/tools/release-bundle/build.ts
 //                               uses for the embedder release asset).
-//   - translator_shim.wasm   — copied alongside entry.js because
-//                               @deltic/translator's browser arm resolves
-//                               `new URL("./translator_shim.wasm",
-//                               import.meta.url)` relative to the module
-//                               that's fetching it; `deno bundle` leaves
-//                               that `new URL(...)` expression untouched
-//                               (verified by inspecting the bundle output
-//                               at authoring time), so the asset must sit
-//                               next to entry.js at that exact relative
-//                               path.
 //   - build-stamp.json        — { gitRev, builtAt } for the E2E server's
 //                               build-identity probe (dispatch's mandatory
 //                               "verify the served build before trusting
 //                               any probe" rule).
+//
+// No translator_shim.wasm: translation happens at BUILD time (`just
+// example <name>` emits a translation envelope next to the component —
+// embedder-api.md amendment A4), so the bundle no longer imports
+// @deltic/translator and nothing ever fetches the shim asset.
 
 import { dirname, fromFileUrl, join, normalize } from "jsr:@std/path@1";
 
@@ -51,6 +46,7 @@ export async function buildHarness(): Promise<void> {
       "browser",
       "--format",
       "esm",
+      "--minify",
       "-o",
       join(distDir, "entry.js"),
       join(harnessDir, "entry.ts"),
@@ -61,9 +57,6 @@ export async function buildHarness(): Promise<void> {
   });
   const { code } = await cmd.output();
   if (code !== 0) throw new Error(`deno bundle failed with code ${code}`);
-
-  const shimSrc = join(repoRoot, ".deps", "polyengine", "translator", "translator_shim.wasm");
-  await Deno.copyFile(shimSrc, join(distDir, "translator_shim.wasm"));
 
   const stamp = { gitRev: await gitRev(), builtAt: new Date().toISOString() };
   await Deno.writeTextFile(join(distDir, "build-stamp.json"), JSON.stringify(stamp, null, 2));

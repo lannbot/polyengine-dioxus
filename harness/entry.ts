@@ -19,19 +19,14 @@
 // mounting works in Deno — same mountApp API, real DOM here instead of
 // linkedom), host/src/host.ts (mountApp contract).
 //
-// Translator-in-browser handling: @deltic/translator's defaultTranslator()
-// (.deps/polyengine/translator/mod.ts) already has a browser arm — when
-// neither Deno nor Node globals are present it `fetch()`es
-// `new URL("./translator_shim.wasm", import.meta.url)`. `deno bundle`
-// preserves that `new URL(..., import.meta.url)` pattern as a plain
-// string relative to the bundle's own module URL (verified empirically —
-// see harness/README-ish note in the E2E track report), so we just need
-// the wasm asset served alongside dist/entry.js at the same relative
-// path the source module used
-// (.deps/polyengine/translator/translator_shim.wasm ->
-// harness/dist/translator_shim.wasm). No special-casing needed here.
+// Translation happens at BUILD time (embedder-api.md amendment A4): `just
+// example <name>` emits a translation envelope `<name>.plan.json` next to
+// the component, and this page fetches the two together and reconstitutes
+// artifacts via `artifactsFromEnvelope`. No translator and no
+// translator_shim.wasm is shipped — importing @deltic/translator here,
+// even lazily, would put it back in the bundle.
 
-import { defaultTranslator } from "@deltic/translator";
+import { artifactsFromEnvelope } from "@deltic/runtime/embedder";
 import { mountApp } from "../host/src/host.ts";
 
 // Pages assembly mode (harness/pages.ts) injects `window.__DEFAULT_APP`
@@ -99,17 +94,29 @@ async function main(): Promise<void> {
     // best-effort; absence just means the identity probe test fails loudly
   }
 
-  const res = await fetch(`./${app}.component.wasm`);
+  // Component and envelope are independent fetches — issue them together.
+  const [res, planRes] = await Promise.all([
+    fetch(`./${app}.component.wasm`),
+    fetch(`./${app}.plan.json`),
+  ]);
   if (!res.ok) {
     throw new Error(`fetching component failed: ${res.status} ${res.statusText}`);
   }
+  if (!planRes.ok) {
+    throw new Error(
+      `fetching translation envelope ${app}.plan.json failed: ${planRes.status} ` +
+        `${planRes.statusText} — run \`just example ${app}\` to build it.`,
+    );
+  }
   const componentBytes = new Uint8Array(await res.arrayBuffer());
+  const envelopeText = await planRes.text();
 
-  const translator = await defaultTranslator();
+  // Build-time translation (A4): the envelope embeds the component's
+  // sha-256, so a mismatched deploy fails loudly at instantiation.
+  const source = artifactsFromEnvelope(envelopeText, componentBytes);
 
   const mounted = await mountApp({
-    componentBytes,
-    translator,
+    source,
     root,
     onError: (err) => {
       errors.push({ source: "onError", detail: err instanceof Error ? (err.stack ?? err.message) : String(err) });

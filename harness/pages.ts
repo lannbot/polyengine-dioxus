@@ -8,17 +8,21 @@
 // (https://<user>.github.io/polyengine-dioxus/). Every URL in the
 // assembled page/bundle must be relative:
 //   - index.html's <script src> is "./entry.js" (page-relative).
-//   - entry.js's own `new URL("./translator_shim.wasm", import.meta.url)`
-//     and `new URL("./build-stamp.json", import.meta.url)` resolve
-//     relative to wherever entry.js itself is fetched from — so entry.js
-//     must sit directly next to those assets, i.e. NOT nested under a
-//     dist/ subdirectory the way harness/dist/ is for the dev lane. This
+//   - entry.js's own `new URL("./build-stamp.json", import.meta.url)`
+//     resolves relative to wherever entry.js itself is fetched from — so
+//     entry.js must sit directly next to that asset, i.e. NOT nested under
+//     a dist/ subdirectory the way harness/dist/ is for the dev lane. This
 //     assembly copies dist/entry.js straight into dist-pages/'s root
-//     alongside translator_shim.wasm and build-stamp.json to match.
-//   - entry.ts's component fetch (`./${app}.component.wasm`) and its
-//     per-app stylesheet `<link>` (harness/entry.ts's APP_CSS map) are
-//     already page-relative — both resolve correctly once copied next to
-//     index.html here.
+//     alongside build-stamp.json to match.
+//   - entry.ts's component fetch (`./${app}.component.wasm`), its envelope
+//     fetch (`./${app}.plan.json`) and its per-app stylesheet `<link>`
+//     (harness/entry.ts's APP_CSS map) are already page-relative — all
+//     resolve correctly once copied next to index.html here.
+//
+// Assets copied per app: <name>.component.wasm and <name>.plan.json (the
+// build-time translation envelope — embedder-api.md amendment A4), both
+// from examples/build/. No translator_shim.wasm: production ships
+// component + envelope + runtime, no translator.
 //
 // Default app: index.html sets `window.__DEFAULT_APP = "todomvc"` in an
 // inline script BEFORE the module script runs (entry.ts reads
@@ -79,8 +83,10 @@ const PAGES_INDEX_HTML = `<!DOCTYPE html>
 </html>
 `;
 
-async function requireComponent(name: string): Promise<string> {
-  const path = join(buildDir, `${name}.component.wasm`);
+/** Resolve one `just example <name>` output (`.component.wasm` or the A4
+ * translation envelope `.plan.json`), failing actionably if it is absent. */
+async function requireArtifact(name: string, suffix: string): Promise<string> {
+  const path = join(buildDir, `${name}.${suffix}`);
   try {
     await Deno.stat(path);
   } catch (e) {
@@ -95,13 +101,18 @@ async function requireComponent(name: string): Promise<string> {
 }
 
 export async function buildPages(): Promise<void> {
-  // Reuse the dev bundle build (dist/entry.js, dist/translator_shim.wasm,
-  // dist/build-stamp.json) — the assembly below just re-lays those flat.
+  // Reuse the dev bundle build (dist/entry.js, dist/build-stamp.json) —
+  // the assembly below just re-lays those flat.
   await buildHarness();
 
-  const todomvcWasm = await requireComponent("todomvc");
-  const counterWasm = await requireComponent("counter");
-  const componentsWasm = await requireComponent("components");
+  const apps = ["todomvc", "counter", "components"];
+  const artifacts = await Promise.all(
+    apps.map(async (name) => ({
+      name,
+      wasm: await requireArtifact(name, "component.wasm"),
+      plan: await requireArtifact(name, "plan.json"),
+    })),
+  );
 
   await Deno.mkdir(distPagesDir, { recursive: true });
 
@@ -112,13 +123,13 @@ export async function buildPages(): Promise<void> {
   await Deno.writeTextFile(join(distPagesDir, ".nojekyll"), "");
 
   await Deno.copyFile(join(distDir, "entry.js"), join(distPagesDir, "entry.js"));
-  await Deno.copyFile(join(distDir, "translator_shim.wasm"), join(distPagesDir, "translator_shim.wasm"));
   await Deno.copyFile(join(distDir, "build-stamp.json"), join(distPagesDir, "build-stamp.json"));
   await Deno.copyFile(join(harnessDir, "todomvc.css"), join(distPagesDir, "todomvc.css"));
-  await Deno.copyFile(todomvcWasm, join(distPagesDir, "todomvc.component.wasm"));
-  await Deno.copyFile(counterWasm, join(distPagesDir, "counter.component.wasm"));
   await Deno.copyFile(join(harnessDir, "components.css"), join(distPagesDir, "components.css"));
-  await Deno.copyFile(componentsWasm, join(distPagesDir, "components.component.wasm"));
+  for (const { name, wasm, plan } of artifacts) {
+    await Deno.copyFile(wasm, join(distPagesDir, `${name}.component.wasm`));
+    await Deno.copyFile(plan, join(distPagesDir, `${name}.plan.json`));
+  }
 }
 
 if (import.meta.main) {

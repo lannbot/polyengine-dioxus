@@ -74,6 +74,13 @@ example name: sever-tool
       "$module.severed.wasm" \
       -o examples/build/{{name}}.component.wasm
     wasm-tools validate --features component-model,cm-async examples/build/{{name}}.component.wasm
+    # Build-time translation (embedder-api.md amendment A4): the translation
+    # ENVELOPE is the blessed deploy artifact, so the deployed site ships
+    # component.wasm + envelope + runtime and NO translator.
+    deno run --allow-read --allow-write --config .deps/polyengine/deno.json \
+      .deps/polyengine/tools/translate/main.ts \
+      examples/build/{{name}}.component.wasm \
+      -o examples/build/{{name}}.plan.json
 
 # Regenerate golden vectors (runs the Rust generator, then verifies the TS
 # decoder agrees).
