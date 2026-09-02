@@ -11,11 +11,13 @@
 //!   2. That in turn needs a `web-sys` shim dependency (see Cargo.toml's
 //!      comment) purely so the crate's (unused-here) `dialog` module
 //!      type-checks; those JS-boundary calls are dead code from this
-//!      example's point of view and get stripped/severed at build time.
+//!      example's point of view; on wasm32-wasip2 wasm-bindgen emits no
+//!      imports at all, so they only need to typecheck.
 //!   3. **The UPSTREAM Dialog, Portal, and Tooltip are never used below.**
 //!      All three cross the JS boundary at runtime (scroll lock / focus
 //!      trap / reparenting / `setTimeout` delays), which traps once
-//!      `wbg-sever` has severed this component's JS imports — this renderer
+//!      the guest is built for wasm32-wasip2, where wasm-bindgen compiles to
+//!      off-target stubs that abort on call — this renderer
 //!      has no JS boundary left at instantiation time. JS-free replacements
 //!      for Dialog and Tooltip live in `jsfree.rs` (which also explains why
 //!      Portal needs no replacement); the gallery uses those. Everything

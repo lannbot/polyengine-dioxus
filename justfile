@@ -33,46 +33,41 @@ deps:
     fi
 
 check:
-    cargo check --workspace --target wasm32-unknown-unknown
-    cargo clippy --workspace --target wasm32-unknown-unknown -- -D warnings
+    cargo check --workspace --target wasm32-wasip2
+    cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
     deno task check
-
-# Build the wbg-sever tool (standalone workspace: native, not wasm32 — see
-# tools/wbg-sever/Cargo.toml's `[workspace]`). Idempotent: cargo no-ops if the
-# binary is already up to date.
-sever-tool:
-    cargo build --release --manifest-path tools/wbg-sever/Cargo.toml
 
 test:
     cargo test
     deno task test
 
 # Build the surface-probe fixture component into fixtures/build/. The
-# full-stack host tests load it.
-fixtures: sever-tool
+# full-stack host tests load it. wasm32-wasip2 emits a component directly.
+fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p fixtures/build
-    cargo build -p surface-probe --target wasm32-unknown-unknown --release
-    ./tools/wbg-sever/target/release/wbg-sever \
-      target/wasm32-unknown-unknown/release/surface_probe.wasm \
-      target/wasm32-unknown-unknown/release/surface_probe.severed.wasm
-    wasm-tools component new \
-      target/wasm32-unknown-unknown/release/surface_probe.severed.wasm \
-      -o fixtures/build/surface-probe.component.wasm
+    cargo build -p surface-probe --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/surface_probe.wasm \
+      fixtures/build/surface-probe.component.wasm
     wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe.component.wasm
 
 # Build an example app component into examples/build/.
-example name: sever-tool
+#
+# The wasm32-wasip2 target emits a COMPONENT directly (rustc runs the
+# module→component step itself against the wasi:cli p2 world), so there is no
+# separate `wasm-tools component new` and no JS-boundary surgery: wasm-bindgen
+# compiles to off-target stubs here and emits no imports at all. What the
+# component does import beyond our own world is the WASI p2 surface that
+# wasi-libc pulls in (cli/io/clocks/random); the host satisfies it with
+# `@polyengine/wasi` (see host/src/host.ts).
+example name:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p examples/build
-    cargo build -p {{name}}-example --target wasm32-unknown-unknown --release
-    module="target/wasm32-unknown-unknown/release/$(echo {{name}} | tr - _)_example.wasm"
-    ./tools/wbg-sever/target/release/wbg-sever "$module" "$module.severed.wasm"
-    wasm-tools component new \
-      "$module.severed.wasm" \
-      -o examples/build/{{name}}.component.wasm
+    cargo build -p {{name}}-example --target wasm32-wasip2 --release
+    component="target/wasm32-wasip2/release/$(echo {{name}} | tr - _)_example.wasm"
+    cp "$component" examples/build/{{name}}.component.wasm
     wasm-tools validate --features component-model,cm-async examples/build/{{name}}.component.wasm
     # Build-time translation (embedder-api.md amendment A4): the translation
     # ENVELOPE is the blessed deploy artifact, so the deployed site ships

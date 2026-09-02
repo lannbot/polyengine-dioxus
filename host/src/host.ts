@@ -7,6 +7,7 @@
 // mapping"). Cited inline as `contract:<section>`.
 
 import { instantiate } from "@deltic/runtime/embedder";
+import { wasi } from "@polyengine/wasi";
 import type { InstantiateSource } from "@deltic/runtime/embedder";
 import type { DirectSource, Stream } from "@deltic/protocol";
 
@@ -380,6 +381,12 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   }
 
   const imports = {
+    // WASI p2 providers. Guest components are built for wasm32-wasip2,
+    // which links wasi-libc and therefore imports wasi:cli/io/clocks/random
+    // whether or not the app calls them (std's startup touches
+    // environment/stdio). polyengine ships the implementations; `wasi()`
+    // returns them keyed by interface id, ready to spread.
+    ...wasi(),
     // Keyed by the verbatim interface id (contract:"Module wiring and
     // instantiation"), so the version tracks the WIT package version —
     // now 0.2.0. `events`' sole host-implemented item is the `dom-event`

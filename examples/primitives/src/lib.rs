@@ -14,7 +14,8 @@
 //!
 //! # Compatibility matrix
 //!
-//! This renderer has no JS boundary (`wbg-sever` removes the wasm-bindgen
+//! This renderer has no JS boundary (on wasm32-wasip2 wasm-bindgen compiles
+//! to off-target stubs that abort rather than emitting
 //! imports, so an executed wasm-bindgen call traps) and no wall clock. That
 //! rules three groups of primitives out of this demo:
 //!
@@ -30,7 +31,7 @@
 //!    silently does nothing. Excluded because a demo of a control that looks
 //!    right and doesn't work is worse than no demo.
 //! 2. **wasm-bindgen timers** — select, toast, context_menu pull
-//!    `dioxus-sdk-time` -> `gloo-timers`, whose calls are severed imports and
+//!    `dioxus-sdk-time` -> `gloo-timers`, whose calls hit wasm-bindgen stubs and
 //!    would trap on execution.
 //! 3. **No wall clock** — calendar, date_picker need
 //!    `OffsetDateTime::now_local_date()`, which this host does not provide.
