@@ -1,8 +1,8 @@
 // Static file server for the E2E lane (owned by e2e/). Serves the
 // harness/ directory (index.html, dist/*, todomvc.css) at "/" and
-// additionally maps "/<name>.component.wasm" to
-// examples/build/<name>.component.wasm (built by `just example <name>`,
-// outside harness/'s own tree) for each known example.
+// additionally maps "/<name>.component.wasm" and "/<name>.plan.json" to
+// examples/build/<name>.* (built by `just example <name>`, outside
+// harness/'s own tree) for each known example.
 //
 // MANDATORY per dispatch: bind port 0, print the real port so the caller
 // can parse it — never hard-code a port (parallel worktrees collide).
@@ -48,6 +48,16 @@ function handler(req: Request): Promise<Response> {
     const name = pathname.slice(1, -".component.wasm".length);
     if (KNOWN_APPS.includes(name)) {
       return serveFile(join(buildDir, `${name}.component.wasm`));
+    }
+  }
+
+  // The build-time translation envelope (embedder-api.md amendment A4)
+  // sits next to the component in examples/build/; entry.ts fetches it
+  // page-relative, same as the component.
+  if (pathname.endsWith(".plan.json")) {
+    const name = pathname.slice(1, -".plan.json".length);
+    if (KNOWN_APPS.includes(name)) {
+      return serveFile(join(buildDir, `${name}.plan.json`));
     }
   }
 

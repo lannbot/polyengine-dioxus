@@ -7,7 +7,7 @@
 // mapping"). Cited inline as `contract:<section>`.
 
 import { instantiate } from "@deltic/runtime/embedder";
-import type { Translator } from "@deltic/runtime/shim";
+import type { InstantiateSource } from "@deltic/runtime/embedder";
 import type { DirectSource, Stream } from "@deltic/protocol";
 
 import { DomApplier } from "./applier.ts";
@@ -17,11 +17,14 @@ import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
 
 export interface MountOptions {
-  componentBytes: Uint8Array;
-  /** The @deltic/translator instance (or translator-shim bytes — see
-   * embedder-api.md "Module wiring and instantiation" §"Untranslated
-   * artifacts" A3). Typed `unknown` here per the dispatch's contract. */
-  translator: unknown;
+  /** Component artifacts in either form `instantiate` accepts: a
+   * build-time translation ENVELOPE reconstituted via
+   * `artifactsFromEnvelope` (what the harness/Pages build ships — the
+   * blessed deploy artifact per embedder-api.md amendment A4, so no
+   * translator is deployed), or `{ componentBytes, translator }` for
+   * callers that translate at runtime (amendment A3). Passed through
+   * verbatim to `instantiate`. */
+  source: InstantiateSource;
   root: Element;
   /** Asynchronous failure after a successful mount: the mutation stream's
    * parked direct-read session rejecting (guest trap — `PeerTrappedError` —
@@ -177,10 +180,7 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     "polymorph:dioxus/events@0.1.0": { DomEvent },
   };
 
-  const instance = await instantiate(
-    { componentBytes: opts.componentBytes, translator: opts.translator as Uint8Array | Translator },
-    imports,
-  );
+  const instance = await instantiate(opts.source, imports);
 
   handleEventExport = instance.exports.handleEvent as (...a: unknown[]) => unknown;
 
