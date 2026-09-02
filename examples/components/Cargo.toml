@@ -1,0 +1,32 @@
+[package]
+name = "components-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polyengine-dioxus = { path = "../.." }
+dioxus = { version = "=0.7.10", default-features = false, features = [
+  "macro",
+  "html",
+  "signals",
+  "hooks",
+] }
+# `default-features = false`: the default `web` feature pulls in the whole
+# dioxus-web renderer, which this pipeline (a plain `cargo build` -> Wasm
+# Component, no `dx` CLI, no browser-hosted VirtualDom) neither needs nor
+# supports.
+dioxus_components = { version = "=0.1.2", default-features = false }
+# Shim for a upstream gap: `dioxus_components`'s `dialog` module
+# unconditionally names `web_sys::KeyboardEvent` and `Window::document`, but
+# its own manifest only enables web-sys's `Window` feature — it relies on
+# dioxus-web's feature unification (via the default `web` feature) to supply
+# the rest. With `default-features = false` above, that unification doesn't
+# happen and the crate fails to compile without these features enabled here
+# ourselves. (The dialog/portal/tooltip code is never called from this
+# example — see src/lib.rs's header — so these are dead-code JS-boundary
+# imports that LTO strips / wbg-sever severs; they just need to typecheck.)
+web-sys = { version = "0.3", features = ["Window", "Document", "KeyboardEvent"] }

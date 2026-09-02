@@ -7,6 +7,7 @@
 
 POLYENGINE_REPO := "https://github.com/polymorph-components/polyengine.git"
 POLYENGINE_REV := "9e17dc97dd3e"
+TAILWIND_VERSION := "v4.3.3"
 
 default: check test
 
@@ -94,6 +95,9 @@ pages:
     if [ ! -f examples/build/todomvc.component.wasm ]; then
       just example todomvc
     fi
+    if [ ! -f examples/build/components.component.wasm ]; then
+      just example components
+    fi
     deno run -A harness/pages.ts
 
 e2e:
@@ -107,3 +111,49 @@ e2e:
     fi
     deno run -A harness/build.ts
     cd e2e && npx playwright test
+
+# Regenerate harness/components.css (committed artifact): Tailwind v4 over
+# the dioxus_components crate sources (its per-component CSS + utility
+# classes named in .rs files + safelist.json) plus this repo's example.
+# Pinned standalone binary; no Node in the pipeline.
+components-css:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -sm)" in
+      "Linux x86_64")  asset=tailwindcss-linux-x64 ;;
+      "Linux aarch64") asset=tailwindcss-linux-arm64 ;;
+      "Darwin arm64")  asset=tailwindcss-macos-arm64 ;;
+      *) echo "components-css: unhandled platform $(uname -sm)" >&2; exit 1 ;;
+    esac
+    bin=".deps/$asset-{{TAILWIND_VERSION}}"
+    if [ ! -x "$bin" ]; then
+      mkdir -p .deps
+      curl -sL -o "$bin" "https://github.com/tailwindlabs/tailwindcss/releases/download/{{TAILWIND_VERSION}}/$asset"
+      chmod +x "$bin"
+    fi
+    crate=$(ls -d ~/.cargo/registry/src/*/dioxus_components-0.1.2 | head -1)
+    tmp=$(mktemp -d)
+    {
+      echo '@import "tailwindcss";'
+      # Theme tokens first: the crate styles itself with shadcn-convention
+      # color tokens it expects the consumer to define (see
+      # harness/components-theme.css).
+      echo "@import \"$(pwd)/harness/components-theme.css\";"
+      # NOT the crate's src/components.css aggregate: its published form
+      # imports ./<name>/<name>.css but the files live under
+      # ./components/<name>/<name>.css, and four of them (card, dialog,
+      # empty, portal) are missing from the package entirely. Import the
+      # per-component css that actually exists, skipping the JS-boundary
+      # components this repo excludes (see examples/components/src/lib.rs).
+      for f in "$crate"/src/components/*/*.css; do
+        case "$f" in
+          */dialog/*|*/portal/*|*/tooltip/*) ;;
+          *) echo "@import \"$f\";" ;;
+        esac
+      done
+      echo "@source \"$crate\";"
+      echo "@source \"$(pwd)/examples/components/src\";"
+    } > "$tmp/input.css"
+    "$bin" -i "$tmp/input.css" -o harness/components.css --minify
+    rm -rf "$tmp"
+

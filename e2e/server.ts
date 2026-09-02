@@ -16,7 +16,7 @@ import { dirname, fromFileUrl } from "jsr:@std/path@1";
 const repoRoot = normalize(join(dirname(fromFileUrl(import.meta.url)), ".."));
 const harnessDir = join(repoRoot, "harness");
 const buildDir = join(repoRoot, "examples", "build");
-const KNOWN_APPS = ["counter", "todomvc"];
+const KNOWN_APPS = ["counter", "todomvc", "components"];
 
 const CONTENT_TYPES: Record<string, string> = {
   ".html": "text/html; charset=utf-8",

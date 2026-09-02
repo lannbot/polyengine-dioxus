@@ -39,7 +39,7 @@ dioxus = { version = "=0.7.10", default-features = false, features = [
 ] }
 
 [workspace]
-members = [".", "fixtures/surface-probe", "examples/counter", "examples/bench-rows", "examples/todomvc"]
+members = [".", "fixtures/surface-probe", "examples/counter", "examples/bench-rows", "examples/todomvc", "examples/components"]
 
 [profile.release]
 opt-level = "s"
