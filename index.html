@@ -2,10 +2,19 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>polymorph-dioxus TodoMVC — GitHub Pages demo</title>
+    <title>polymorph-dioxus examples — GitHub Pages demo</title>
     <link rel="stylesheet" href="./todomvc.css" />
+    <style>
+      nav.examples-nav { font-family: sans-serif; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
+      nav.examples-nav a { margin-right: 1rem; }
+    </style>
   </head>
   <body>
+    <nav class="examples-nav">
+      <a href="./?app=todomvc">TodoMVC</a>
+      <a href="./?app=counter">Counter</a>
+      <a href="./?app=components">Components</a>
+    </nav>
     <pre id="status">loading…</pre>
     <div id="app"></div>
     <script>
