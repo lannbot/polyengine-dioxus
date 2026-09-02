@@ -40,6 +40,16 @@ const PAGES_INDEX_HTML = `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
+    <!-- Mobile: without width=device-width the page lays out at a 980px
+         desktop viewport scaled to ~0.4x on a phone, AND Android Chrome
+         and Firefox keep the ~300ms double-tap-zoom wait on every tap
+         (they only drop it for mobile-optimized pages) — which reads as
+         sluggish interaction no matter how fast the renderer is.
+         initial-scale=1 without maximum-scale/user-scalable keeps
+         pinch-zoom available (blocking it is an accessibility problem);
+         the touch-action rule below removes the double-tap delay on its
+         own, belt-and-braces with the meta. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>polymorph-dioxus examples — GitHub Pages demo</title>
     <!-- No hardcoded stylesheet here: entry.ts injects each app's CSS
          (APP_CSS map). A hardcoded todomvc.css link would leak TodoMVC's
@@ -47,6 +57,8 @@ const PAGES_INDEX_HTML = `<!DOCTYPE html>
          they beat Tailwind's @layer utilities rules regardless of
          specificity — observed live as unstyled gallery buttons. -->
     <style>
+      /* Drops the double-tap-zoom wait on taps (pinch-zoom still works). */
+      html { touch-action: manipulation; }
       nav.examples-nav { font-family: sans-serif; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
       nav.examples-nav a { margin-right: 1rem; }
     </style>
