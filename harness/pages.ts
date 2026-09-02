@@ -1,5 +1,5 @@
-// GitHub Pages static-site assembly for the TodoMVC example (owned by
-// harness/). Run via `deno run -A harness/pages.ts`, or through `just
+// GitHub Pages static-site assembly for the harness's example apps (owned
+// by harness/). Run via `deno run -A harness/pages.ts`, or through `just
 // pages`.
 //
 // Produces a FLAT harness/dist-pages/ (gitignored — see repo .gitignore's
@@ -16,9 +16,9 @@
 //     assembly copies dist/entry.js straight into dist-pages/'s root
 //     alongside translator_shim.wasm and build-stamp.json to match.
 //   - entry.ts's component fetch (`./${app}.component.wasm`) and its
-//     todomvc stylesheet `<link>` (`./todomvc.css`) are already
-//     page-relative (see harness/entry.ts) — both resolve correctly once
-//     copied next to index.html here.
+//     per-app stylesheet `<link>` (harness/entry.ts's APP_CSS map) are
+//     already page-relative — both resolve correctly once copied next to
+//     index.html here.
 //
 // Default app: index.html sets `window.__DEFAULT_APP = "todomvc"` in an
 // inline script BEFORE the module script runs (entry.ts reads
@@ -40,10 +40,19 @@ const PAGES_INDEX_HTML = `<!DOCTYPE html>
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>polymorph-dioxus TodoMVC — GitHub Pages demo</title>
+    <title>polymorph-dioxus examples — GitHub Pages demo</title>
     <link rel="stylesheet" href="./todomvc.css" />
+    <style>
+      nav.examples-nav { font-family: sans-serif; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
+      nav.examples-nav a { margin-right: 1rem; }
+    </style>
   </head>
   <body>
+    <nav class="examples-nav">
+      <a href="./?app=todomvc">TodoMVC</a>
+      <a href="./?app=counter">Counter</a>
+      <a href="./?app=components">Components</a>
+    </nav>
     <pre id="status">loading…</pre>
     <div id="app"></div>
     <script>
@@ -76,6 +85,7 @@ export async function buildPages(): Promise<void> {
 
   const todomvcWasm = await requireComponent("todomvc");
   const counterWasm = await requireComponent("counter");
+  const componentsWasm = await requireComponent("components");
 
   await Deno.mkdir(distPagesDir, { recursive: true });
 
@@ -91,6 +101,8 @@ export async function buildPages(): Promise<void> {
   await Deno.copyFile(join(harnessDir, "todomvc.css"), join(distPagesDir, "todomvc.css"));
   await Deno.copyFile(todomvcWasm, join(distPagesDir, "todomvc.component.wasm"));
   await Deno.copyFile(counterWasm, join(distPagesDir, "counter.component.wasm"));
+  await Deno.copyFile(join(harnessDir, "components.css"), join(distPagesDir, "components.css"));
+  await Deno.copyFile(componentsWasm, join(distPagesDir, "components.component.wasm"));
 }
 
 if (import.meta.main) {

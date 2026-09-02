@@ -103,6 +103,43 @@ try {
     if (consoleErrors.length > 0) throw new Error(`console errors: ${JSON.stringify(consoleErrors)}`);
 
     console.log("PASS: subpath TodoMVC probe (.header + .new-todo render, todo add works, zero errors)");
+
+    // Components demo, same subpath + browser instance (dispatch: "wiring
+    // the `components` example into the harness/pages assembly").
+    const componentsPageErrors: string[] = [];
+    page.on("pageerror", (err) => componentsPageErrors.push(err.stack ?? err.message));
+    const componentsConsoleErrors: string[] = [];
+    page.on("console", (msg) => {
+      if (msg.type() === "error") componentsConsoleErrors.push(msg.text());
+    });
+
+    await page.goto(`${baseUrl}?app=components`);
+    await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+      timeout: 15_000,
+    });
+
+    const componentsMountFailed = await page.evaluate(
+      () => (globalThis as unknown as { __mountFailed?: boolean }).__mountFailed,
+    );
+    if (componentsMountFailed) throw new Error("components: mountApp failed (window.__mountFailed is true)");
+
+    const showcaseCount = await page.locator("#showcase").count();
+    if (showcaseCount === 0) throw new Error("components: #showcase not found");
+
+    await page.locator("#demo-button").click();
+    await page.waitForFunction(
+      () => document.querySelector("#click-count")?.textContent === "1",
+      { timeout: 5_000 },
+    );
+
+    if (componentsPageErrors.length > 0) {
+      throw new Error(`components: page errors: ${JSON.stringify(componentsPageErrors)}`);
+    }
+    if (componentsConsoleErrors.length > 0) {
+      throw new Error(`components: console errors: ${JSON.stringify(componentsConsoleErrors)}`);
+    }
+
+    console.log("PASS: subpath components probe (#showcase renders, #demo-button click works, zero errors)");
   } finally {
     await browser.close();
   }

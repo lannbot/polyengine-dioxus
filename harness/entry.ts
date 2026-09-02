@@ -10,9 +10,9 @@
 // from `./${app}.component.wasm` (page-relative — see e2e/server.ts's
 // mapping for dev, harness/pages.ts's flat assembly for the
 // GitHub-Pages build). For
-// `todomvc` specifically, a `<link>` to harness/todomvc.css is injected —
-// examples/todomvc drops its `asset!`-based Stylesheet (needs the `dx`
-// CLI's asset pipeline; see examples/todomvc/src/lib.rs's header), so the
+// Per-app CSS (see APP_CSS below) is injected via a `<link>` for apps
+// whose example drops an `asset!`-based Stylesheet (needs the `dx` CLI's
+// asset pipeline; see e.g. examples/todomvc/src/lib.rs's header) — the
 // harness supplies the same stylesheet directly instead.
 //
 // Governing docs: host/tests/counter_test.ts (what the app does / how
@@ -49,6 +49,19 @@ interface HarnessError {
   detail: string;
 }
 
+// Per-app stylesheet map: app name -> page-relative CSS href to inject.
+const APP_CSS: Record<string, string> = {
+  todomvc: "./todomvc.css",
+  components: "./components.css",
+};
+
+// Per-app selector that indicates the initial render has landed (waited
+// on below before signaling window.__mounted).
+const APP_MOUNTED_SELECTOR: Record<string, string> = {
+  todomvc: ".todoapp",
+  components: "#showcase",
+};
+
 const errors: HarnessError[] = [];
 (globalThis as unknown as { __e2eErrors: HarnessError[] }).__e2eErrors = errors;
 
@@ -65,10 +78,11 @@ async function main(): Promise<void> {
 
   const app = new URLSearchParams(location.search).get("app") ??
     (globalThis as unknown as Window).__DEFAULT_APP ?? "counter";
-  if (app === "todomvc") {
+  const cssHref = APP_CSS[app];
+  if (cssHref) {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = "./todomvc.css";
+    link.href = cssHref;
     document.head.appendChild(link);
   }
 
@@ -115,7 +129,7 @@ async function main(): Promise<void> {
   //   - window.__e2eErrors: collected page/onError errors (asserted empty).
   (globalThis as unknown as { __mountedHandle: typeof mounted }).__mountedHandle = mounted;
 
-  const mountedSelector = app === "todomvc" ? ".todoapp" : "#count";
+  const mountedSelector = APP_MOUNTED_SELECTOR[app] ?? "#count";
   await waitFor(() => root.querySelector(mountedSelector) !== null);
 
   (globalThis as unknown as { __mounted: boolean }).__mounted = true;
