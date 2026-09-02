@@ -130,3 +130,95 @@ test("components example: gallery mounts, button/checkbox/accordion interactions
   expect(pageErrors, "no uncaught page exceptions").toEqual([]);
   expect(consoleErrors, "no console.error output").toEqual([]);
 });
+
+// JS-free Dialog/Tooltip adaptations (examples/components/src/jsfree.rs).
+// These replace the upstream dioxus_components Dialog/Tooltip, which trap
+// under this renderer once wbg-sever has removed the JS imports. The point
+// of this test is that the replacements are real browser behaviour, not
+// just compiling code: CSS-driven tooltip visibility, and a dialog whose
+// escape/backdrop/close paths all run through plain Dioxus handlers.
+test("components example: JS-free tooltip and dialog behave in a real browser", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() !== "error") return;
+    const text = msg.text();
+    if (BENIGN_CONSOLE_PATTERNS.some((re) => re.test(text))) return;
+    consoleErrors.push(text);
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (err) => pageErrors.push(err.stack ?? err.message));
+
+  await page.goto(baseUrl());
+  await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+    timeout: 15_000,
+  });
+  await expect(page.locator("#showcase")).toBeVisible();
+
+  // --- Tooltip -----------------------------------------------------------
+  // Hidden via `invisible` (not merely opacity-0), so Playwright's
+  // visibility model agrees with the user-visible state.
+  const tooltip = page.locator("#demo-tooltip");
+  const trigger = page.locator("#demo-tooltip-trigger");
+  await expect(tooltip).toBeAttached();
+  await expect(tooltip).toBeHidden();
+
+  // group-hover path. The open delay is CSS `delay-300` on a visibility
+  // transition, so give toBeVisible room to auto-wait past it.
+  await trigger.hover();
+  await expect(tooltip).toBeVisible({ timeout: 5_000 });
+
+  // Moving the pointer off the group hides it again (same delay applies).
+  await page.locator("#showcase h2").first().hover();
+  await expect(tooltip).toBeHidden({ timeout: 5_000 });
+
+  // group-focus-within path: keyboard users get the tooltip too.
+  await trigger.focus();
+  await expect(tooltip).toBeVisible({ timeout: 5_000 });
+  await trigger.blur();
+  await expect(tooltip).toBeHidden({ timeout: 5_000 });
+
+  // --- Dialog ------------------------------------------------------------
+  const dialog = page.locator("#demo-dialog");
+  const openBtn = page.locator("#demo-dialog-open");
+  await expect(dialog).toHaveCount(0);
+
+  // Open.
+  await openBtn.click();
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Dialog body");
+
+  // Escape closes (plain onkeydown on the panel, replacing upstream's
+  // document-level listener). The Tab first is not test scaffolding, it is
+  // the gap: `autofocus` on the close button does not place initial focus,
+  // because the HTML spec ignores autofocus candidates once a document has
+  // finished loading (verified here against a plain
+  // `document.body.appendChild(<button autofocus>)` control, which also
+  // does not focus — so this is the browser, not the renderer). With no
+  // imperative focus available (MountedData is NotSupported) the handler
+  // can only see keys once focus is inside the dialog, which Tab does:
+  // the close button is the next tabbable element after the open button.
+  await page.keyboard.press("Tab");
+  await expect(page.locator("#demo-dialog-close")).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+
+  // Backdrop click closes: click far outside the centred panel.
+  await openBtn.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(5, 5);
+  await expect(dialog).toHaveCount(0);
+
+  // Explicit close button closes (and its stop_propagation does not
+  // interfere).
+  await openBtn.click();
+  await expect(dialog).toBeVisible();
+  await page.locator("#demo-dialog-close").click();
+  await expect(dialog).toHaveCount(0);
+
+  const collectedErrors = await page.evaluate(() =>
+    (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
+  );
+  expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
+  expect(pageErrors, "no uncaught page exceptions").toEqual([]);
+  expect(consoleErrors, "no console.error output").toEqual([]);
+});

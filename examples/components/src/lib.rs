@@ -12,17 +12,23 @@
 //!      comment) purely so the crate's (unused-here) `dialog` module
 //!      type-checks; those JS-boundary calls are dead code from this
 //!      example's point of view and get stripped/severed at build time.
-//!   3. **Dialog, Portal, and Tooltip are never used below.** All three call
-//!      `js_sys::eval` at runtime (scroll lock / focus trap / positioning),
-//!      which traps once `wbg-sever` has severed this component's JS
-//!      imports — this renderer has no JS boundary left at instantiation
-//!      time. Everything shown here (Button, Checkbox, Accordion, Badge,
-//!      Card, Avatar, Spinner, Empty) is plain DOM + Rust-side state, no JS
-//!      calls.
+//!   3. **The UPSTREAM Dialog, Portal, and Tooltip are never used below.**
+//!      All three cross the JS boundary at runtime (scroll lock / focus
+//!      trap / reparenting / `setTimeout` delays), which traps once
+//!      `wbg-sever` has severed this component's JS imports — this renderer
+//!      has no JS boundary left at instantiation time. JS-free replacements
+//!      for Dialog and Tooltip live in `jsfree.rs` (which also explains why
+//!      Portal needs no replacement); the gallery uses those. Everything
+//!      else shown here (Button, Checkbox, Accordion, Badge, Card, Avatar,
+//!      Spinner, Empty) is the upstream component, plain DOM + Rust-side
+//!      state, no JS calls.
 //!
 //! Structural ids referenced by the e2e harness (see the dispatch): the root
-//! `#showcase`, `#demo-button` / `#click-count`, `#checkbox-state`, and
-//! `#demo-accordion`.
+//! `#showcase`, `#demo-button` / `#click-count`, `#checkbox-state`,
+//! `#demo-accordion`, `#demo-tooltip-trigger` / `#demo-tooltip`, and
+//! `#demo-dialog-open` / `#demo-dialog` / `#demo-dialog-close`.
+
+mod jsfree;
 
 use dioxus::prelude::*;
 use dioxus_components::{
@@ -35,6 +41,7 @@ use dioxus_components::{
 fn app() -> Element {
     let mut count = use_signal(|| 0i32);
     let mut checkbox_state = use_signal(|| CheckedState::Unchecked);
+    let mut dialog_open = use_signal(|| false);
 
     rsx! {
         div { id: "showcase", class: "p-6 flex flex-col gap-8",
@@ -100,6 +107,37 @@ fn app() -> Element {
                             AccordionContent { "Content for the second accordion item." }
                         }
                     }
+                }
+            }
+
+            section {
+                h2 { "Tooltip (JS-free)" }
+                // See jsfree.rs: pure CSS, no state, no listeners. The
+                // trigger is a real <button> so `group-focus-within` (the
+                // keyboard path) has something focusable to fire on.
+                jsfree::Tooltip { text: "Tooltip content", bubble_id: "demo-tooltip",
+                    button {
+                        id: "demo-tooltip-trigger",
+                        class: "rounded-md border px-3 py-1.5 text-sm",
+                        "Hover or focus me"
+                    }
+                }
+            }
+
+            section {
+                h2 { "Dialog (JS-free)" }
+                button {
+                    id: "demo-dialog-open",
+                    class: "rounded-md bg-neutral-900 px-3 py-1.5 text-sm text-white",
+                    onclick: move |_| dialog_open.set(true),
+                    "Open dialog"
+                }
+                jsfree::Dialog {
+                    open: dialog_open,
+                    title: "JS-free dialog",
+                    panel_id: "demo-dialog",
+                    close_id: "demo-dialog-close",
+                    p { "Dialog body" }
                 }
             }
 
