@@ -2,6 +2,11 @@
 <html>
   <head>
     <meta charset="utf-8" />
+    <!-- Kept in sync with harness/pages.ts's deployed index: mobile
+         viewport + touch-action so the dev lane reproduces production's
+         tap behavior (see that file's comment for why). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>html { touch-action: manipulation; }</style>
     <title>polymorph-dioxus counter — E2E harness</title>
   </head>
   <body>
