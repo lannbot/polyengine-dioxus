@@ -15,9 +15,17 @@
  *   preview/src/components/{accordion,aspect_ratio,collapsible,dropdown_menu,
  *     hover_card,label,menubar,progress,radio_group,separator,slider,switch,
  *     tabs,toggle,toggle_group,toolbar,tooltip}/style.css
+ *   preview/src/components/{alert_dialog,avatar,calendar,checkbox,date_picker,
+ *     dialog,drag_and_drop_list,popover}/style.css
  *
  * scroll_area is used by the gallery but contributes no rules upstream
  * ("Scroll area doesn't require any additional styles").
+ *
+ * Some upstream demos inline extra layout CSS in their .rs demo file rather
+ * than in style.css (drag_and_drop_list's `.dx-tasks-*`). The gallery does
+ * not reproduce those demo-only skins, so those rules are deliberately
+ * absent; the primitives' own classes (`.dx-dnd-list*`,
+ * `.dx-drop-indicator`) are present and are what the gallery uses.
  *
  * Two additions of ours, both at the END of this file and both marked:
  * a light-theme default, and the gallery's own layout classes.
@@ -1236,6 +1244,1208 @@ html[data-theme="light"] [class~="dxc-system"] {
   display: block;
 }
 
+/* ===== preview/src/components/alert_dialog/style.css ===== */
+/* Alert Dialog Backdrop */
+.dx-alert-dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  background: rgb(0 0 0 / 30%);
+  inset: 0;
+  opacity: 0;
+  will-change: opacity;
+}
+
+.dx-alert-dialog-backdrop[data-state="closed"] {
+  animation: dx-alert-animate-out 150ms ease-in forwards;
+}
+
+@keyframes dx-alert-animate-out {
+  0% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.dx-alert-dialog-backdrop[data-state="open"] {
+  animation: dx-alert-animate-in 150ms ease-out forwards;
+}
+
+@keyframes dx-alert-animate-in {
+  0% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Alert Dialog Container - improved for theme consistency */
+.dx-alert-dialog {
+  position: fixed;
+  z-index: 1001;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: 100%;
+  max-width: calc(100% - 2rem);
+  box-sizing: border-box;
+  flex-direction: column;
+  padding: 32px 24px 24px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 8px;
+  margin: 0;
+  animation: none;
+  background: var(--primary-color-2);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
+  color: var(--secondary-color-4);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  gap: 16px;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.dx-alert-dialog-title {
+  margin: 0;
+  color: var(--secondary-color-4);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dx-alert-dialog-description {
+  margin: 0;
+  color: var(--secondary-color-5);
+  font-size: 1rem;
+}
+
+.dx-alert-dialog-actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 12px;
+}
+
+@media (width >= 40rem) {
+  .dx-alert-dialog-actions {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .dx-alert-dialog {
+    max-width: 32rem;
+    text-align: left;
+  }
+}
+
+.dx-alert-dialog-cancel {
+  padding: 8px 18px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 0.5rem;
+  background-color: var(--light, var(--primary-color))
+    var(--dark, var(--primary-color-3));
+  color: var(--secondary-color-4);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.dx-alert-dialog-cancel:hover {
+  background-color: var(--primary-color-4);
+}
+
+.dx-alert-dialog-cancel:focus-visible {
+  box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+.dx-alert-dialog-action {
+  padding: 8px 18px;
+  border: 1px solid var(--primary-error-color);
+  border-radius: 0.5rem;
+  background-color: var(--primary-error-color);
+  color: var(--contrast-error-color);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.dx-alert-dialog-action:hover {
+  background-color: var(--secondary-error-color);
+}
+
+.dx-alert-dialog-action:focus-visible {
+  box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+/* ===== preview/src/components/avatar/style.css ===== */
+.dx-avatar-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.dx-avatar-label {
+    margin: 0;
+    color: var(--secondary-color-4);
+    font-size: 0.875rem;
+}
+
+/* Avatar Component Styles */
+.dx-avatar {
+    position: relative;
+    display: inline-flex;
+    overflow: hidden;
+    width: 64px;
+    height: 64px;
+    flex-shrink: 0;
+    align-items: center;
+    justify-content: center;
+    color: var(--secondary-color-4);
+    font-weight: 500;
+}
+
+.dx-avatar-image {
+    width: 100%;
+    height: 100%;
+    aspect-ratio: 1;
+}
+
+/* Avatar sizes */
+.dx-avatar-sm {
+    width: 2rem;
+    height: 2rem;
+    font-size: 0.875rem;
+}
+
+.dx-avatar-md {
+    width: 3rem;
+    height: 3rem;
+    font-size: 1.25rem;
+}
+
+.dx-avatar-lg {
+    width: 4rem;
+    height: 4rem;
+    font-size: 1.75rem;
+}
+
+/* Avatar shape */
+.dx-avatar-circle {
+    border-radius: 50%;
+}
+
+.dx-avatar-rounded {
+    border-radius: 8px;
+}
+
+.dx-avatar[data-state="loading"] {
+    animation: dx-pulse 1.5s infinite ease-in-out;
+    background: var(--primary-color-5);
+}
+
+.dx-avatar[data-state="empty"] {
+    background: var(--primary-color-7);
+}
+
+@keyframes dx-pulse {
+    0% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.7;
+    }
+
+    100% {
+        opacity: 1;
+    }
+}
+
+.dx-avatar-fallback {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    align-items: center;
+    justify-content: center;
+    background: var(--primary-color);
+    color: var(--secondary-color-4);
+    font-size: 1.5rem;
+}
+
+.dx-avatar[data-state="error"] .dx-avatar-fallback {
+    background: var(--primary-color-3);
+    color: var(--secondary-color-4);
+}
+
+/* ===== preview/src/components/calendar/style.css ===== */
+/* Calendar Container */
+.dx-calendar {
+    display: flex;
+    width: fit-content;
+    max-width: 100%;
+    box-sizing: border-box;
+    flex-direction: row;
+    border: 1px solid var(--primary-color-6);
+    border-radius: 8px;
+    background-color: var(--primary-color-2);
+    box-shadow: 0 2px 10px rgb(0 0 0 / 10%);
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
+        sans-serif;
+}
+
+/* Calendar Navigation */
+.dx-calendar-navigation {
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.75rem;
+    padding: 0.75rem calc(0.75rem + 1.75rem + 0.5rem) 0.25rem;
+    gap: 0.5rem;
+}
+
+.dx-calendar-nav-title {
+    color: var(--secondary-color-4);
+    font-size: 16px;
+    font-weight: 600;
+}
+
+.dx-calendar-nav-prev,
+.dx-calendar-nav-next {
+    position: absolute;
+    display: flex;
+    width: 1.75rem;
+    height: 1.75rem;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--primary-color-6);
+    border-radius: 0.5rem;
+    background-color: var(--light, transparent)
+        var(--dark, var(--primary-color-3));
+    color: var(--secondary-color-5);
+    cursor: pointer;
+    font-size: 1rem;
+}
+
+.dx-calendar-nav-prev {
+    left: 0.75rem;
+}
+
+.dx-calendar-nav-next {
+    right: 0.75rem;
+}
+
+.dx-calendar-nav-prev:hover,
+.dx-calendar-nav-next:hover {
+    border-color: var(--primary-color-7);
+    background-color: var(--primary-color-4);
+    color: var(--secondary-color-4);
+}
+
+.dx-calendar-nav-prev:focus-visible,
+.dx-calendar-nav-next:focus-visible {
+    box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+.dx-calendar-nav-prev:disabled,
+.dx-calendar-nav-next:disabled {
+    border-color: var(--primary-color-5);
+    background-color: var(--primary-color-2);
+    color: var(--secondary-color-3);
+    cursor: not-allowed;
+}
+
+.dx-calendar-month-title {
+    display: flex;
+    width: 100%;
+    height: 1.75rem;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Calendar Grid */
+.dx-calendar-view {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+}
+
+.dx-calendar-grid {
+    width: 100%;
+    padding: 0.5rem;
+}
+
+.dx-calendar-grid-header {
+    display: flex;
+    flex-direction: row;
+    margin-bottom: 8px;
+}
+
+.dx-calendar-grid-day-header {
+    flex: 1;
+    color: var(--secondary-color-5);
+    font-size: 12px;
+    font-weight: 300;
+    text-align: center;
+}
+
+.dx-calendar-grid-body {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+.dx-calendar-grid-cell {
+    width: 2rem;
+    border: none;
+    border-radius: 0.5rem;
+    aspect-ratio: 1;
+    background: none;
+    color: var(--secondary-color-4);
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.dx-calendar-grid-cell[data-month="current"]:not([data-disabled="true"]):hover {
+    background-color: var(--primary-color-4);
+}
+
+.dx-calendar-grid-cell[data-month="current"]:focus-visible {
+    outline: 2px solid var(--focused-border-color);
+    outline-offset: 2px;
+}
+
+.dx-calendar-grid-cell[data-month="last"],
+.dx-calendar-grid-cell[data-month="next"],
+.dx-calendar-grid-cell[data-disabled="true"] {
+    color: var(--secondary-color-5);
+    cursor: not-allowed;
+}
+
+.dx-calendar-grid-cell[data-month="last"][data-selected="true"],
+.dx-calendar-grid-cell[data-month="next"][data-selected="true"] {
+    background-color: var(--secondary-color-6);
+}
+
+.dx-calendar-grid-cell[data-month="current"][data-selected="true"] {
+    background-color: var(--secondary-color-2);
+    color: var(--primary-color);
+}
+
+.dx-calendar-grid-cell[data-month="current"][data-unavailable="true"] {
+    color: var(--secondary-color-6);
+    cursor: not-allowed;
+    text-decoration: line-through;
+}
+
+.dx-calendar-grid-week td {
+    padding-right: 0;
+    padding-left: 0;
+}
+
+.dx-calendar-grid-week td:first-child .dx-calendar-grid-cell {
+    border-bottom-left-radius: 0.5rem;
+    border-top-left-radius: 0.5rem;
+}
+
+.dx-calendar-grid-week td:last-child .dx-calendar-grid-cell {
+    border-bottom-right-radius: 0.5rem;
+    border-top-right-radius: 0.5rem;
+}
+
+.dx-calendar-grid-cell[data-month="last"][data-selection-between="true"],
+.dx-calendar-grid-cell[data-month="next"][data-selection-between="true"] {
+    border-radius: 0;
+    background-color: var(--primary-color-5);
+    color: var(--secondary-color-5);
+}
+
+.dx-calendar-grid-cell[data-month="current"][data-selection-between="true"] {
+    border-radius: 0;
+    background-color: var(--primary-color-5);
+    color: var(--secondary-color-4);
+}
+
+td:has(.dx-calendar-grid-cell[data-selection-start="true"]) {
+    padding: 0;
+    margin-top: 1px;
+    margin-bottom: 1px;
+    background-color: var(--primary-color-5);
+    border-bottom-left-radius: 0.5rem;
+    border-top-left-radius: 0.5rem;
+}
+
+td:has(.dx-calendar-grid-cell[data-selection-end="true"]) {
+    padding: 0;
+    margin-top: 1px;
+    margin-bottom: 1px;
+    background-color: var(--primary-color-5);
+    border-bottom-right-radius: 0.5rem;
+    border-top-right-radius: 0.5rem;
+}
+
+.dx-calendar-grid-cell[data-month="current"][data-selected="true"]:hover {
+    background-color: var(--light, var(--secondary-color-2))
+        var(--dark, var(--primary-color-5));
+    color: var(--light, var(--primary-color))
+        var(--dark, var(--secondary-color-1));
+    font-weight: var(--light, 550) var(--dark, inherit);
+}
+
+.dx-calendar-grid-cell[data-month="current"][data-today="true"]:not(
+        [data-selected="true"]
+    ) {
+    background-color: var(--primary-color-5);
+}
+
+.dx-calendar-grid-weeknum {
+    border-radius: 0.5rem;
+    background-color: var(--primary-color);
+    color: var(--secondary-color-5);
+    font-size: 12px;
+}
+
+/* Calendar with week numbers */
+.dx-calendar-grid-week {
+    display: flex;
+    width: 100%;
+    flex-direction: row;
+    justify-content: space-between;
+}
+
+/* Calendar states */
+.dx-calendar[data-disabled="true"] {
+    opacity: 0.6;
+    pointer-events: none;
+}
+
+.dx-calendar-month-select-container,
+.dx-calendar-year-select-container {
+    position: relative;
+}
+
+.dx-calendar-month-select-container:has(:focus-visible),
+.dx-calendar-year-select-container:has(:focus-visible) {
+    border-radius: 0.5rem;
+    outline: 2px solid var(--focused-border-color);
+}
+
+.dx-calendar-month-select,
+.dx-calendar-year-select {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    padding: 0.25rem;
+    margin: 0;
+    inset: 0;
+    opacity: 0;
+}
+
+.dx-calendar-month-select-value,
+.dx-calendar-year-select-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.25rem;
+    border: none;
+    background-color: transparent;
+    color: var(--secondary-color-4);
+    cursor: pointer;
+    font-size: 1rem;
+    transition:
+        background-color 0.2s ease,
+        color 0.2s ease;
+}
+
+/* ===== preview/src/components/checkbox/style.css ===== */
+.dx-checkbox {
+    width: 1rem;
+    height: 1rem;
+    box-sizing: border-box;
+    padding: 0;
+    border: none;
+    border-radius: 4px;
+    margin: 0;
+    background-color: var(--primary-color-3);
+    box-shadow: inset 0 0 0 1px var(--primary-color-7);
+    color: var(--secondary-color-4);
+    cursor: pointer;
+}
+
+.dx-checkbox-indicator {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.dx-checkbox[data-state="checked"] {
+    background-color: var(--secondary-color-2);
+    box-shadow: none;
+    color: var(--primary-color);
+}
+
+.dx-checkbox:focus-visible {
+    box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+/* ===== preview/src/components/date_picker/style.css ===== */
+.dx-date-picker {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.dx-date-picker-group .dx-date-picker-popover-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: none;
+    background-color: transparent;
+    cursor: pointer;
+    transition: rotate 150ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dx-date-picker [data-state="open"] .dx-date-picker-trigger {
+    rotate: 180deg;
+}
+
+.dx-date-picker[data-disabled="true"],
+.dx-date-picker [data-disabled="true"] {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.dx-date-picker-group {
+    display: flex;
+    width: fit-content;
+    min-width: 150px;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem;
+    border: none;
+    border-radius: 0.5rem;
+    background: none;
+    background: var(--light, var(--primary-color))
+        var(--dark, var(--primary-color-3));
+    box-shadow: inset 0 0 0 1px var(--light, var(--primary-color-6))
+        var(--dark, var(--primary-color-7));
+    color: var(--secondary-color-4);
+    gap: 0.25rem;
+    transition: background-color 100ms ease-out;
+}
+
+.dx-date-picker-group .dx-date-picker-popover-content {
+    max-width: unset;
+    padding: 0;
+}
+
+.dx-date-picker-popover-content[data-state="open"] {
+    animation: dx-date-picker-popover-fade-in .15s ease-out;
+}
+
+.dx-date-picker-popover-content[data-state="closed"] {
+    animation: dx-date-picker-popover-fade-out .15s ease-out forwards;
+    pointer-events: none;
+}
+
+@keyframes dx-date-picker-popover-fade-in {
+    from {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes dx-date-picker-popover-fade-out {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+
+    to {
+        opacity: 0;
+        transform: translateY(-4px);
+    }
+}
+
+.dx-date-segment {
+    caret-color: transparent;
+}
+
+.dx-date-segment[no-date="true"] {
+    color: var(--secondary-color-5);
+}
+
+.dx-date-segment[is-separator="true"] {
+    padding: 0;
+}
+
+.dx-date-segment:focus-visible {
+    border-radius: 0.25rem;
+    background: var(--secondary-color-3);
+    color: var(--primary-color);
+    outline: none;
+}
+
+/* ===== preview/src/components/dialog/style.css ===== */
+/* Dialog Backdrop */
+.dx-dialog-backdrop {
+  position: fixed;
+  z-index: 1000;
+  background: rgb(0 0 0 / 30%);
+  inset: 0;
+  opacity: 0;
+  will-change: opacity;
+}
+
+.dx-dialog-backdrop[data-state="closed"] {
+  animation: dx-dialog-backdrop-animate-out 150ms ease-in forwards;
+  pointer-events: none;
+}
+
+@keyframes dx-dialog-backdrop-animate-out {
+  0% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+  }
+}
+
+.dx-dialog-backdrop[data-state="open"] {
+  animation: dx-dialog-backdrop-animate-in 150ms ease-out forwards;
+}
+
+@keyframes dx-dialog-backdrop-animate-in {
+  0% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Dialog Container - improved for theme consistency */
+.dx-dialog {
+  position: fixed;
+  z-index: 1001;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  width: 100%;
+  max-width: calc(100% - 2rem);
+  box-sizing: border-box;
+  flex-direction: column;
+  padding: 32px 24px 24px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 8px;
+  margin: 0;
+  background: var(--primary-color-2);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 18%);
+  color: var(--secondary-color-4);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica,
+    Arial, sans-serif;
+  gap: 16px;
+  text-align: center;
+  transform: translate(-50%, -50%);
+}
+
+.dx-dialog-title {
+  margin: 0;
+  color: var(--secondary-color-4);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dx-dialog-description {
+  margin: 0;
+  color: var(--secondary-color-5);
+  font-size: 1rem;
+}
+
+@media (width >= 40rem) {
+  .dx-dialog {
+    max-width: 32rem;
+    text-align: left;
+  }
+}
+
+.dx-dialog-close {
+  position: absolute;
+  top: 1rem;
+  right: 1rem;
+  align-self: flex-start;
+  padding: 0;
+  border: none;
+  margin: 0;
+  background: none;
+  color: var(--secondary-color-3);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+}
+
+.dx-dialog-close:hover {
+  color: var(--secondary-color-1);
+}
+
+/* ===== preview/src/components/drag_and_drop_list/style.css ===== */
+.dx-dnd-list {
+  --dx-item-gap: 6px;
+
+  width: 100%;
+}
+
+.dx-dnd-list-ul {
+  display: flex;
+  flex-direction: column;
+  padding-left: 0;
+  margin: 0;
+  gap: var(--dx-item-gap);
+  perspective: 1200px;
+}
+
+.dx-dnd-list-item {
+  --gap-shift: 0px;
+  --tilt: 0deg;
+
+  position: relative;
+  display: flex;
+  box-sizing: border-box;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 14px 12px 10px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 10px;
+  background-color: var(--light, #fff)
+    var(--dark, var(--primary-color-4));
+  color: var(--secondary-color-4);
+  cursor: grab;
+  list-style: none;
+  outline: none;
+  transform: translateY(var(--gap-shift)) rotateX(var(--tilt));
+  transform-style: preserve-3d;
+  transition:
+    border-color 150ms ease,
+    background-color 150ms ease,
+    box-shadow 150ms ease,
+    transform 180ms cubic-bezier(0.2, 0.9, 0.3, 1),
+    opacity 150ms ease;
+  user-select: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dx-dnd-list-item:hover {
+    --gap-shift: -1px;
+
+    border-color: var(--primary-color-7);
+    background-color: var(--light, #fff) var(--dark, var(--primary-color-6));
+    box-shadow:
+      0 1px 2px rgb(0 0 0 / 4%),
+      0 3px 8px rgb(0 0 0 / 4%);
+  }
+
+  .dx-dnd-list-item:active {
+    --gap-shift: 0px;
+
+    transition-duration: 80ms;
+  }
+}
+
+.dx-dnd-list-item:focus-visible {
+  border-color: var(--focused-border-color);
+  box-shadow: 0 0 0 3px
+    var(--light, rgb(43 127 255 / 18%)) var(--dark, rgb(43 127 255 / 30%));
+}
+
+.dx-dnd-list-item[data-is-grabbing="true"] {
+  --gap-shift: 0px;
+  --tilt: 0deg;
+
+  border-style: dashed;
+  border-color: var(--primary-color-7);
+  background-color: transparent;
+  box-shadow: none;
+  cursor: grabbing;
+  opacity: 0.5;
+  transition-duration: 80ms;
+}
+
+.dx-dnd-list-item[data-is-grabbing="true"][data-drop-at-origin="true"] {
+  border-style: solid;
+  border-color: var(--focused-border-color);
+  box-shadow: 0 0 0 3px
+    var(--light, rgb(43 127 255 / 18%)) var(--dark, rgb(43 127 255 / 30%));
+  opacity: 0.75;
+}
+
+.dx-item-icon {
+  flex-shrink: 0;
+  margin-right: 6px;
+  color: var(--secondary-color-6);
+  transition: color 150ms ease;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .dx-dnd-list-item:hover .dx-item-icon {
+    color: var(--secondary-color-2);
+  }
+}
+
+.dx-item-body-div {
+  min-width: 0;
+  flex-grow: 1;
+  font-size: 14px;
+  font-weight: normal;
+  line-height: 20px;
+}
+
+.dx-remove-button {
+  display: flex;
+  overflow: visible;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-style: none;
+  border-radius: 6px;
+  margin-left: 10px;
+  background-color: transparent;
+  color: var(--secondary-color-6);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 80ms ease;
+}
+
+.dx-remove-button:hover {
+  background-color: var(--light, var(--primary-color-5))
+    var(--dark, var(--primary-color-6));
+  color: var(--secondary-color-2);
+}
+
+.dx-remove-button:active {
+  transform: scale(0.92);
+}
+
+.dx-remove-button:focus-visible {
+  outline: 2px solid var(--focused-border-color);
+  outline-offset: 2px;
+}
+
+.dx-drop-indicator {
+  display: none;
+}
+
+.dx-dnd-list-item::before,
+.dx-dnd-list-item::after {
+  position: absolute;
+  right: 10px;
+  left: 10px;
+  height: 3px;
+  border-radius: 999px;
+  background-color: var(--focused-border-color);
+  content: "";
+  opacity: 0;
+  pointer-events: none;
+  transform:
+    rotateX(calc(-1 * var(--tilt)))
+    translateY(calc(-1 * var(--gap-shift)))
+    scaleX(0.7);
+  transition:
+    opacity 140ms ease-out,
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.dx-dnd-list-item::before {
+  top: calc(-1 * (var(--dx-item-gap) / 2 + 2.5px));
+  transform-origin: center bottom;
+}
+
+.dx-dnd-list-item::after {
+  bottom: calc(-1 * (var(--dx-item-gap) / 2 + 2.5px));
+  transform-origin: center top;
+}
+
+.dx-drop-indicator[data-position="before"] + .dx-dnd-list-item::before,
+.dx-dnd-list-item:has(+ .dx-drop-indicator[data-position="after"])::after {
+  opacity: 0.9;
+  transform:
+    rotateX(calc(-1 * var(--tilt)))
+    translateY(calc(-1 * var(--gap-shift)))
+    scaleX(1);
+}
+
+.dx-dnd-list-item:has(+ .dx-drop-indicator) {
+  --gap-shift: -1px;
+  --tilt: -3deg;
+
+  transform-origin: center bottom;
+}
+
+.dx-drop-indicator + .dx-dnd-list-item {
+  --gap-shift: 1px;
+  --tilt: 3deg;
+
+  transform-origin: center top;
+}
+
+/* ===== preview/src/components/popover/style.css ===== */
+.dx-popover {
+  position: relative;
+  display: inline-block;
+}
+
+.dx-popover-content {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  min-width: 200px;
+  max-width: calc(100% - 2rem);
+  box-sizing: border-box;
+  flex-direction: column;
+  padding: .25rem;
+  border-radius: .5rem;
+  margin-top: .5rem;
+  background: var(--light, var(--primary-color))
+      var(--dark, var(--primary-color-5));
+  box-shadow: inset 0 0 0 1px var(--light, var(--primary-color-6)) var(--dark, var(--primary-color-7));
+  text-align: center;
+  transform: translate(-50%, -50%);
+  transform-origin: top;
+  will-change: transform, opacity;
+}
+
+.dx-popover-content[data-state="open"] {
+  animation: dx-popover-fade-in .2s ease-in-out;
+}
+
+.dx-popover-content[data-state="closed"] {
+  animation: dx-popover-fade-out .2s ease-in-out forwards;
+  pointer-events: none;
+}
+
+@keyframes dx-popover-fade-in {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dx-popover-fade-out {
+  from {
+    opacity: 1;
+  }
+
+  to {
+    opacity: 0;
+  }
+}
+
+/* Positioning based on side */
+.dx-popover-content[data-side="top"] {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  margin-bottom: 8px;
+  transform: translateX(-50%);
+}
+
+.dx-popover-content[data-side="top"]::after {
+  top: calc(100% - 0.25rem);
+  left: 50%;
+  border-color: var(--secondary-color-4);
+  border-radius: 0 0 0.1rem;
+}
+
+.dx-popover-content[data-side="right"] {
+  position: absolute;
+  top: 50%;
+  left: 100%;
+  margin-left: 8px;
+  transform: translateY(-50%);
+}
+
+.dx-popover-content[data-side="right"]::after {
+  top: calc(50% - 0.25rem);
+  left: 0;
+  border-color: var(--secondary-color-4);
+  border-radius: 0 0 0 0.1rem;
+}
+
+.dx-popover-content[data-side="bottom"] {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-top: 8px;
+  transform: translateX(-50%);
+}
+
+.dx-popover-content[data-side="bottom"]::after {
+  bottom: calc(100% - 0.25rem);
+  left: 50%;
+  border-color: var(--secondary-color-4);
+  border-radius: 0.1rem 0 0;
+}
+
+.dx-popover-content[data-side="left"] {
+  position: absolute;
+  top: 50%;
+  right: 100%;
+  margin-right: 8px;
+  transform: translateY(-50%);
+}
+
+.dx-popover-content[data-side="left"]::after {
+  top: calc(50% - 0.25rem);
+  right: -0.25rem;
+  border-color: var(--secondary-color-4);
+  border-radius: 0 0.1rem 0 0;
+}
+
+/* Alignment styles for top and bottom */
+.dx-popover-content[data-side="top"][data-align="start"],
+.dx-popover-content[data-side="bottom"][data-align="start"] {
+  left: 0;
+  transform: none;
+}
+
+.dx-popover-content[data-side="top"][data-align="end"],
+.dx-popover-content[data-side="bottom"][data-align="end"] {
+  right: 0;
+  left: auto;
+  transform: none;
+}
+
+/* Alignment styles for left and right */
+.dx-popover-content[data-side="left"][data-align="start"],
+.dx-popover-content[data-side="right"][data-align="start"] {
+  top: 0;
+  transform: none;
+}
+
+.dx-popover-content[data-side="left"][data-align="center"],
+.dx-popover-content[data-side="right"][data-align="center"] {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.dx-popover-content[data-side="left"][data-align="end"],
+.dx-popover-content[data-side="right"][data-align="end"] {
+  top: auto;
+  bottom: 0;
+  transform: none;
+}
+
+.dx-popover-content-title {
+  margin: 0;
+  color: var(--secondary-color-4);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.dx-popover-content-description {
+  margin: 0;
+  color: var(--secondary-color-5);
+  font-size: 1rem;
+}
+
+.dx-popover-content-actions {
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 12px;
+}
+
+@media (width >= 40rem) {
+  .dx-popover-content-actions {
+    flex-direction: row;
+    justify-content: flex-end;
+  }
+
+  .dx-popover-content {
+    max-width: 32rem;
+    text-align: left;
+  }
+}
+
+.dx-popover-content-cancel {
+  padding: 8px 18px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 0.5rem;
+  background-color: var(--light, var(--primary-color))
+    var(--dark, var(--primary-color-3));
+  color: var(--secondary-color-4);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.dx-popover-content-cancel:hover {
+  background-color: var(--primary-color-4);
+}
+
+.dx-popover-content-cancel:focus-visible {
+  box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+.dx-popover-content-action {
+  padding: 8px 18px;
+  border: 1px solid var(--primary-error-color);
+  border-radius: 0.5rem;
+  background-color: var(--primary-error-color);
+  color: var(--contrast-error-color);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.dx-popover-content-action:hover {
+  background-color: var(--secondary-error-color);
+}
+
+.dx-popover-content-action:focus-visible {
+  box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
+.dx-popover-trigger {
+  padding: 8px 18px;
+  border: 1px solid var(--primary-color-6);
+  border-radius: 0.5rem;
+  background-color: var(--light, var(--primary-color))
+    var(--dark, var(--primary-color-3));
+  color: var(--secondary-color-4);
+  cursor: pointer;
+  font-size: 1rem;
+  transition: background-color 0.2s ease;
+}
+
+.dx-popover-trigger:hover {
+  background-color: var(--primary-color-4);
+}
+
+.dx-popover-trigger:focus-visible {
+  box-shadow: 0 0 0 2px var(--focused-border-color);
+}
+
 /* ===== ADDED (not upstream): light theme by default =====
  *
  * The theme above switches palettes with the empty-value trick: exactly one
@@ -1286,3 +2496,4 @@ html[data-theme="light"] [class~="dxc-system"] {
   align-items: flex-start;
   gap: 0.5rem;
 }
+
