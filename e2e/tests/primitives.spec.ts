@@ -142,10 +142,52 @@ test("primitives example: gallery mounts, switch/tabs/accordion interactions wor
   await expect(openContent).toBeVisible();
   await expect(openContent).toContainText(/\S/);
 
-  // 5) Zero collected page errors / console errors throughout.
+  // 5) The sections added once the guest moved to wasm32-wasip2 (clock
+  // available) and the "include eval-degraded components too" directive.
+  // These assert *presence and shape*, never eval-driven behaviour — see
+  // examples/primitives/src/lib.rs's compatibility matrix for what each of
+  // these deliberately does not do here.
+  for (
+    const id of [
+      "#demo-p-dialog-open",
+      "#demo-p-alert-open",
+      "#demo-p-popover-open",
+      "#demo-p-calendar",
+      "#demo-p-date-picker",
+      "#checkbox-p-state",
+    ]
+  ) {
+    await expect(page.locator(id), `${id} must render`).toBeVisible();
+  }
+
+  // Calendar renders a real month grid off the wasi:clocks wall clock. 44 =
+  // 7 weekday headers + 5 or 6 week rows of days; assert "many cells", not an
+  // exact count, since the grid size depends on the month being displayed.
+  const calendarDays = page.locator("#demo-p-calendar [role=\"gridcell\"], #demo-p-calendar button");
+  expect(await calendarDays.count(), "calendar must render a populated grid").toBeGreaterThan(20);
+
+  // Drag-and-drop list: the items render. Dragging is NOT asserted — the drop
+  // target is decided by an eval-installed document listener, so mouse drag
+  // cannot work here (keyboard reordering is the working path upstream).
+  expect(await page.locator(".dx-dnd-list-item").count(), "dnd list must render its items").toBe(3);
+
+  // 6) Dialog interaction: the trigger opens it and the content appears.
+  // Deliberately NOT asserted: escape-to-close, outside-click dismissal and
+  // the focus trap, all of which need document::eval.
+  await expect(page.locator(".dx-dialog")).toBeHidden();
+  await page.locator("#demo-p-dialog-open").click();
+  await expect(page.locator(".dx-dialog")).toBeVisible();
+  await expect(page.locator(".dx-dialog")).toContainText("Item information");
+  await page.locator("#demo-p-dialog-close").click();
+
+  // 7) Zero collected page errors / console errors throughout.
   const collectedErrors = await page.evaluate(() =>
     (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
   );
+  // The load-bearing assertion for the eval-degraded additions: dioxus's
+  // NoOpDocument answers eval with EvalError::Unsupported, so those calls
+  // must degrade silently. Anything that trapped instead surfaces here as a
+  // "guest trapped: unreachable" onError entry.
   expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
   expect(pageErrors, "no uncaught page exceptions").toEqual([]);
   expect(consoleErrors, "no console.error output").toEqual([]);

@@ -24,3 +24,7 @@ dioxus = { version = "=0.7.10", default-features = false, features = [
 # timer-side dependencies this pipeline (plain `cargo build` -> Wasm
 # Component, no `dx` CLI, no JS boundary) neither needs nor supports.
 dioxus-primitives = { git = "https://github.com/DioxusLabs/dioxus-components", rev = "bf007c15d0cf4d04d3181cc46cf12325aa773955", default-features = false }
+# `calendar` / `date_picker` speak in `time::Date`, and dioxus-primitives does
+# not re-export the crate, so the gallery has to name it directly. Already in
+# the tree via dioxus-primitives, so this costs nothing.
+time = { version = "0.3", default-features = false }
