@@ -3,7 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <title>polymorph-dioxus examples — GitHub Pages demo</title>
-    <link rel="stylesheet" href="./todomvc.css" />
+    <!-- No hardcoded stylesheet here: entry.ts injects each app's CSS
+         (APP_CSS map). A hardcoded todomvc.css link would leak TodoMVC's
+         UNLAYERED global button/input resets into the other demos, where
+         they beat Tailwind's @layer utilities rules regardless of
+         specificity — observed live as unstyled gallery buttons. -->
     <style>
       nav.examples-nav { font-family: sans-serif; padding: 0.5rem 1rem; border-bottom: 1px solid #ccc; }
       nav.examples-nav a { margin-right: 1rem; }
