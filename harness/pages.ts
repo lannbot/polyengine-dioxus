@@ -72,6 +72,7 @@ const PAGES_INDEX_HTML = `<!DOCTYPE html>
       <a href="./?app=todomvc">TodoMVC</a>
       <a href="./?app=counter">Counter</a>
       <a href="./?app=components">Components</a>
+      <a href="./?app=primitives">Primitives</a>
     </nav>
     <pre id="status">loading…</pre>
     <div id="app"></div>
@@ -105,7 +106,7 @@ export async function buildPages(): Promise<void> {
   // the assembly below just re-lays those flat.
   await buildHarness();
 
-  const apps = ["todomvc", "counter", "components"];
+  const apps = ["todomvc", "counter", "components", "primitives"];
   const artifacts = await Promise.all(
     apps.map(async (name) => ({
       name,
@@ -126,6 +127,7 @@ export async function buildPages(): Promise<void> {
   await Deno.copyFile(join(distDir, "build-stamp.json"), join(distPagesDir, "build-stamp.json"));
   await Deno.copyFile(join(harnessDir, "todomvc.css"), join(distPagesDir, "todomvc.css"));
   await Deno.copyFile(join(harnessDir, "components.css"), join(distPagesDir, "components.css"));
+  await Deno.copyFile(join(harnessDir, "primitives.css"), join(distPagesDir, "primitives.css"));
   for (const { name, wasm, plan } of artifacts) {
     await Deno.copyFile(wasm, join(distPagesDir, `${name}.component.wasm`));
     await Deno.copyFile(plan, join(distPagesDir, `${name}.plan.json`));
