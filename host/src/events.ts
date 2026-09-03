@@ -61,13 +61,48 @@ export interface NativeEventLike {
   value?: string;
   checked?: boolean;
   // scroll (read off currentTarget/target normally; see #scrollData)
+  // composition (CompositionEvent.data)
+  data?: string;
+  // animation / transition — `pseudoElement` and `elapsedTime` are common to
+  // both; the name field differs (AnimationEvent.animationName vs
+  // TransitionEvent.propertyName).
+  animationName?: string;
+  propertyName?: string;
+  pseudoElement?: string;
+  elapsedTime?: number;
+  // touch (TouchEvent.touches/changedTouches/targetTouches are TouchList,
+  // an array-like — see #touchList)
+  touches?: ArrayLike<TouchPointLike>;
+  changedTouches?: ArrayLike<TouchPointLike>;
+  targetTouches?: ArrayLike<TouchPointLike>;
+}
+
+/** Duck-typed `Touch` (per-point fields of a TouchList entry). */
+interface TouchPointLike {
+  identifier?: number;
+  clientX?: number;
+  clientY?: number;
+  pageX?: number;
+  pageY?: number;
+  screenX?: number;
+  screenY?: number;
+  radiusX?: number;
+  radiusY?: number;
+  rotationAngle?: number;
+  force?: number;
 }
 
 // -- event name -> payload family --------------------------------------------
 
+// dioxus-html-0.7.10 generated.rs Mouse(MouseData) events= list
+// (generated.rs:216-257) plus its `#[raw = [doubleclick]]` alias
+// (generated.rs:256): the raw name `doubleclick` (distinct from the
+// `ondoubleclick => dblclick` events-list mapping already covered by
+// `dblclick` below) also routes to the mouse family.
 const MOUSE_EVENTS = new Set([
   "click",
   "dblclick",
+  "doubleclick",
   "contextmenu",
   "mousedown",
   "mouseup",
@@ -79,12 +114,51 @@ const MOUSE_EVENTS = new Set([
 ]);
 
 const KEYBOARD_EVENTS = new Set(["keydown", "keyup", "keypress"]);
-// dioxus-html-0.7.10 generated.rs Form(FormData) events= list includes
-// `onreset => reset` alongside input/change/submit.
-const FORM_EVENTS = new Set(["input", "change", "submit", "reset"]);
+// dioxus-html-0.7.10 generated.rs Form(FormData) events= list
+// (generated.rs:61-106) includes `onreset => reset` and
+// `oninvalid => invalid` alongside input/change/submit.
+const FORM_EVENTS = new Set(["input", "change", "submit", "reset", "invalid"]);
 // dioxus-html-0.7.10 generated.rs Scroll(ScrollData) events= list includes
 // `onscrollend => scrollend` alongside scroll.
 const SCROLL_EVENTS = new Set(["scroll", "scrollend"]);
+
+// dioxus-html-0.7.10 generated.rs Image(ImageData) events= list
+// (generated.rs:108-113): `onerror => error, onload => load`. Bare names,
+// no prefix relation to any Media name (Media's names are all distinct
+// strings — `error`/`load` are not substrings of any Media name and vice
+// versa) and not otherwise claimed by MOUSE_EVENTS/isPointerEvent/
+// KEYBOARD_EVENTS/FORM_EVENTS/SCROLL_EVENTS/DRAG_EVENTS above. See
+// collision analysis in the final report.
+const IMAGE_EVENTS = new Set(["error", "load"]);
+
+// dioxus-html-0.7.10 generated.rs Composition(CompositionData) events= list
+// (generated.rs:31-37).
+const COMPOSITION_EVENTS = new Set([
+  "compositionstart",
+  "compositionend",
+  "compositionupdate",
+]);
+
+// dioxus-html-0.7.10 generated.rs Animation(AnimationData) events= list
+// (generated.rs:9-15).
+const ANIMATION_EVENTS = new Set([
+  "animationstart",
+  "animationend",
+  "animationiteration",
+]);
+
+// dioxus-html-0.7.10 generated.rs Transition(TransitionData) events= list
+// (generated.rs:313-317).
+const TRANSITION_EVENTS = new Set(["transitionend"]);
+
+// dioxus-html-0.7.10 generated.rs Touch(TouchData) events= list
+// (generated.rs:304-311).
+const TOUCH_EVENTS = new Set([
+  "touchstart",
+  "touchmove",
+  "touchend",
+  "touchcancel",
+]);
 
 // dioxus-html-0.7.10 generated.rs Pointer(PointerData) events= list includes
 // gotpointercapture, lostpointercapture, and (per this version) auxclick —
@@ -294,6 +368,70 @@ function scrollData(ev: NativeEventLike) {
   };
 }
 
+/** Image family: `load-error` is derived from the event NAME (`error` vs
+ * `load`), not from any field on ImageData — dioxus-html-0.7.10 has no
+ * accessor that reads it off the DOM event itself. Precedent for a
+ * name-dependent builder: `formData(name, ev)` above. */
+function imageData(name: string): { loadError: boolean } {
+  return { loadError: name === "error" };
+}
+
+function compositionData(ev: NativeEventLike) {
+  return { data: str(ev.data) };
+}
+
+function animationData(ev: NativeEventLike) {
+  return {
+    animationName: str(ev.animationName),
+    pseudoElement: str(ev.pseudoElement),
+    elapsedTime: num(ev.elapsedTime),
+  };
+}
+
+function transitionData(ev: NativeEventLike) {
+  return {
+    propertyName: str(ev.propertyName),
+    pseudoElement: str(ev.pseudoElement),
+    elapsedTime: num(ev.elapsedTime),
+  };
+}
+
+/** `TouchEvent.touches`/`.changedTouches`/`.targetTouches` are `TouchList`,
+ * an array-LIKE (indexed + `.length`, no array methods) — convert to a
+ * plain array of wit touch-point records, defensively degrading through
+ * num()/str()/bool() exactly like every other family so a synthesized
+ * partial (or absent) list never throws. */
+function touchList(list: ArrayLike<TouchPointLike> | undefined) {
+  if (!list) return [];
+  const out = [];
+  for (let i = 0; i < list.length; i++) {
+    const t = list[i] ?? {};
+    out.push({
+      identifier: num(t.identifier),
+      clientX: num(t.clientX),
+      clientY: num(t.clientY),
+      pageX: num(t.pageX),
+      pageY: num(t.pageY),
+      screenX: num(t.screenX),
+      screenY: num(t.screenY),
+      radiusX: num(t.radiusX),
+      radiusY: num(t.radiusY),
+      rotationAngle: num(t.rotationAngle),
+      force: num(t.force),
+    });
+  }
+  return out;
+}
+
+function touchData(ev: NativeEventLike) {
+  return {
+    touches: touchList(ev.touches),
+    changedTouches: touchList(ev.changedTouches),
+    targetTouches: touchList(ev.targetTouches),
+    mods: mods(ev),
+  };
+}
+
 /** Serialize a native event into the wit `events.payload` value shape
  * (contracts/embedder-api.md "Value mapping": variant -> `{ kind, value }`).
  * Family chosen by event name, mirroring dioxus-html's name->data-type
@@ -306,6 +444,11 @@ export function serializePayload(name: string, ev: NativeEventLike): unknown {
   if (name === "wheel") return { kind: "wheel", value: wheelData(ev) };
   if (FORM_EVENTS.has(name)) return { kind: "form", value: formData(name, ev) };
   if (SCROLL_EVENTS.has(name)) return { kind: "scroll", value: scrollData(ev) };
+  if (IMAGE_EVENTS.has(name)) return { kind: "image", value: imageData(name) };
+  if (COMPOSITION_EVENTS.has(name)) return { kind: "composition", value: compositionData(ev) };
+  if (ANIMATION_EVENTS.has(name)) return { kind: "animation", value: animationData(ev) };
+  if (TRANSITION_EVENTS.has(name)) return { kind: "transition", value: transitionData(ev) };
+  if (TOUCH_EVENTS.has(name)) return { kind: "touch", value: touchData(ev) };
   return { kind: "empty" };
 }
 

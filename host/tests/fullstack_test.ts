@@ -123,6 +123,44 @@ Deno.test("fullstack (stream transport): mount, event round trip, ordering", asy
     "the later click's summary replaced the keydown's — no corrupted interleave",
   );
 
+  // 4c) Dispatch a touchstart carrying a populated TouchList-shaped
+  // payload. This is the one new payload with a `list<record>`, so it is
+  // the mapping the host's hand-written kebab->camelCase convention
+  // (host/src/events.ts module doc) is most likely to get wrong — and a
+  // misnamed field lowers silently as a default rather than throwing.
+  // The fixture's touch summary (module doc "Event summary format")
+  // witnesses all three list lengths, every field of `touches[0]`, and the
+  // modifiers mask, so a defaulted field shows up as a 0 here.
+  const touchPoint = (identifier: number, base: number) => ({
+    identifier,
+    clientX: base + 0.5,
+    clientY: base + 1.5,
+    pageX: base + 2.5,
+    pageY: base + 3.5,
+    screenX: base + 4.5,
+    screenY: base + 5.5,
+    radiusX: 3.5,
+    radiusY: 4.5,
+    rotationAngle: 45,
+    force: 0.75,
+  });
+  // Three distinct lengths, so no two of the three lists can be confused
+  // for each other: three fingers down, two on the target, one changed.
+  const touchStartEvent = {
+    type: "touchstart",
+    touches: [touchPoint(11, 12), touchPoint(22, 30), touchPoint(33, 50)],
+    changedTouches: [touchPoint(33, 50)],
+    targetTouches: [touchPoint(11, 12), touchPoint(22, 30)],
+    altKey: true,
+    shiftKey: true,
+  };
+  const EXPECTED_TOUCH_SUMMARY =
+    "touchstart:touch:3/1/2;11,12.5,13.5,14.5,15.5,16.5,17.5,3.5,4.5,45,0.75;a--s";
+  mounted.dispatch(section, "touchstart", touchStartEvent);
+  await waitFor(() => root.innerHTML.includes(EXPECTED_TOUCH_SUMMARY), "touchstart summary");
+  assertEquals(root.innerHTML.includes(EXPECTED_TOUCH_SUMMARY), true);
+  assertEquals(mounted.frameDecoder.pending(), 0);
+
   assertEquals(errors, [], "no onError callback ever fired");
 
   mounted.dispose();

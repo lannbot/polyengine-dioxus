@@ -20,8 +20,8 @@
 //!   and a THIRD dynamic child left as a bare placeholder comment with an
 //!   assigned id (assign-id, id 4) — exercising assign-id independently of
 //!   replace-placeholder rather than on the same slot.
-//!   Listeners: `click` and `keydown`, both bubbling (new-event-listener
-//!   x2), plus a `set-attribute` TEXT op (`title`).
+//!   Listeners: `click`, `keydown` and `touchstart`, all bubbling
+//!   (new-event-listener x3), plus a `set-attribute` TEXT op (`title`).
 //! - `input` (id 5): a second template's root (load-template, register-
 //!   template again), with an `input` listener (bubbling) and a
 //!   `set-attribute` BOOL op (`disabled` = false, exercising the boolean-
@@ -34,11 +34,37 @@
 //! "input" serves as both the second template's tag name and the third
 //! listener's event name — same interned slot, no wire-format rule forbids
 //! it): 0=`section` 1=`class` 2=`click` 3=`keydown` 4=`input` 5=`title`
-//! 6=`disabled`. `handle-event`'s `name: u16` therefore arrives as one of
-//! {2, 3, 4} for our own listeners; `event_name_for_id` below is this
+//! 6=`disabled` 7=`touchstart`. `handle-event`'s `name: u16` therefore
+//! arrives as one of {2, 3, 4, 7} for our own listeners;
+//! `event_name_for_id` below is this
 //! fixture's (test-only) reverse lookup — real Dioxus tracks this
 //! guest-side via its own event tables, which this minimal probe doesn't
 //! reproduce.
+//!
+//! # Event summary format
+//!
+//! Every dispatched event writes one deterministic line into the "ready"
+//! text node (id 2): `{name}:{kind}:{detail}`. `detail` is per-kind:
+//!
+//! - `mouse`: `{buttons},{client-x as i64}`
+//! - `keyboard`: `{key}`
+//! - `form`: `{value}`
+//! - `empty`: `-`
+//! - `touch`: `{nt}/{nc}/{ng};{point0};{mods}`, where `nt`/`nc`/`ng` are
+//!   the lengths of `touches`/`changed-touches`/`target-touches`;
+//!   `point0` is `touches[0]`'s eleven fields in wit declaration order —
+//!   `identifier,client-x,client-y,page-x,page-y,screen-x,screen-y,
+//!   radius-x,radius-y,rotation-angle,force` (f64s via Rust's
+//!   shortest-round-trip `Display`, so `100.0` prints `100`), or `-` when
+//!   `touches` is empty; and `mods` is a fixed four-slot mask
+//!   `alt|ctrl|meta|shift` rendering each set flag as `a`/`c`/`m`/`s` and
+//!   each unset one as `-`. Witnessing the three lengths, every nested
+//!   per-point field AND the flags is deliberate: the host builds these
+//!   values by a hand-written kebab->camelCase naming convention
+//!   (host/src/events.ts) and a misnamed field lowers silently as a
+//!   default, so a detail that reported only list lengths would pass with
+//!   every point field zeroed.
+//! - anything else: `-`
 
 wit_bindgen::generate!({
     path: "../../wit",
@@ -46,7 +72,7 @@ wit_bindgen::generate!({
 });
 
 use core::cell::RefCell;
-use polymorph::dioxus::events::DomEvent as HostDomEvent;
+use polymorph::dioxus::events::{DomEvent as HostDomEvent, Modifiers};
 
 // -- wire encoding ------------------------------------------------------------
 //
@@ -219,12 +245,14 @@ const STR_KEYDOWN: u16 = 3;
 const STR_INPUT: u16 = 4; // tag "input" AND event name "input" — same text
 const STR_TITLE: u16 = 5;
 const STR_DISABLED: u16 = 6;
+const STR_TOUCHSTART: u16 = 7;
 
 fn event_name_for_id(id: u16) -> &'static str {
     match id {
         STR_CLICK => "click",
         STR_KEYDOWN => "keydown",
         STR_INPUT => "input",
+        STR_TOUCHSTART => "touchstart",
         _ => "unknown",
     }
 }
@@ -241,6 +269,7 @@ fn build_initial_batch() -> (Vec<u8>, String) {
     e.cache_string(STR_INPUT, "input");
     e.cache_string(STR_TITLE, "title");
     e.cache_string(STR_DISABLED, "disabled");
+    e.cache_string(STR_TOUCHSTART, "touchstart");
 
     // register-template(tmpl=0): <section class="probe">hdr{dyn}{dyn}</section>
     e.register_template_header(0, 1);
@@ -269,9 +298,10 @@ fn build_initial_batch() -> (Vec<u8>, String) {
     e.replace_placeholder(&[1], 1);
     // set-attribute TEXT on section.
     e.set_attribute_text(1, STR_TITLE, None, "probe-section");
-    // two bubbling listeners on section.
+    // three bubbling listeners on section.
     e.new_event_listener(1, STR_CLICK, true);
     e.new_event_listener(1, STR_KEYDOWN, true);
+    e.new_event_listener(1, STR_TOUCHSTART, true);
     // append-children(root, m=1): pop section, attach under root.
     e.append_children(0, 1);
 
@@ -300,6 +330,48 @@ fn summarize(name: u16, payload: &Payload) -> (String, bool) {
         }
         Payload::Keyboard(k) => (format!("{name}:keyboard:{}", k.key), false),
         Payload::Form(f) => (format!("{name}:form:{}", f.value), false),
+        Payload::Touch(t) => {
+            // Witnesses the three list lengths, every nested field of
+            // touches[0], and the modifiers flags — see the module doc's
+            // "Event summary format". Anything less would still pass with
+            // the per-point fields silently defaulted to 0.
+            let point = t.touches.first().map_or_else(
+                || "-".to_string(),
+                |p| {
+                    format!(
+                        "{},{},{},{},{},{},{},{},{},{},{}",
+                        p.identifier,
+                        p.client_x,
+                        p.client_y,
+                        p.page_x,
+                        p.page_y,
+                        p.screen_x,
+                        p.screen_y,
+                        p.radius_x,
+                        p.radius_y,
+                        p.rotation_angle,
+                        p.force,
+                    )
+                },
+            );
+            let flag = |on: bool, c: char| if on { c } else { '-' };
+            let m = t.mods;
+            let mods: String = [
+                flag(m.contains(Modifiers::ALT), 'a'),
+                flag(m.contains(Modifiers::CTRL), 'c'),
+                flag(m.contains(Modifiers::META), 'm'),
+                flag(m.contains(Modifiers::SHIFT), 's'),
+            ]
+            .iter()
+            .collect();
+            let detail = format!(
+                "{}/{}/{};{point};{mods}",
+                t.touches.len(),
+                t.changed_touches.len(),
+                t.target_touches.len(),
+            );
+            (format!("{name}:touch:{detail}"), false)
+        }
         Payload::Empty => (format!("{name}:empty:-"), false),
         _ => (format!("{name}:other:-"), false),
     }
