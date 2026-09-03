@@ -13,7 +13,7 @@
 /// any change to opcodes, operand layouts, or framing bumps the package
 /// version (instantiation is digest-checked, so a mismatch fails loudly and
 /// early).
-package polymorph:dioxus@0.3.0;
+package polymorph:dioxus@0.4.0;
 
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
@@ -23,9 +23,13 @@ package polymorph:dioxus@0.3.0;
 /// `empty` because there is nothing to carry: focus, cancel, clipboard,
 /// media, selection and toggle events have data types in dioxus-html that
 /// expose no accessors at all, so a handler can observe nothing beyond the
-/// fact that the event fired. Resize and visible are `empty` for a
-/// different reason: dioxus synthesizes them from ResizeObserver /
-/// IntersectionObserver, and this renderer never fires them.
+/// fact that the event fired — that is the whole `empty` set.
+///
+/// Two families are not DOM events at all: `resize` and `visible` are
+/// synthesized, by the host, from a ResizeObserver and an
+/// IntersectionObserver attached when the guest registers a listener for
+/// them (this mirrors what dioxus-web's interpreter does in-browser). They
+/// carry the observer entry's snapshot like any other family.
 ///
 /// `onmounted` also carries an `empty` payload, but is
 /// not "uncovered": its handler's value is the `MountedData` handle the
@@ -35,6 +39,12 @@ package polymorph:dioxus@0.3.0;
 /// Also home to the host-implemented `dom-event` resource — the live-event
 /// handle lent to `handle-event`.
 interface events {
+  /// The observer-backed families below report geometry, in the same CSS
+  /// pixel spaces the `dom` interface's queries use; reusing its records
+  /// keeps one definition of each shape (`dom` does not name `events`, so
+  /// there is no cycle).
+  use dom.{rect, size};
+
   flags modifiers { alt, ctrl, meta, shift }
 
   record mouse-data {
@@ -194,6 +204,61 @@ interface events {
     mods: modifiers,
   }
 
+  /// One ResizeObserver entry for the observed element.
+  ///
+  /// The DOM reports both boxes writing-mode-relative
+  /// (`blockSize`/`inlineSize`); the host resolves that to width/height
+  /// before sending, so the guest never has to know the element's writing
+  /// mode. Backs `ResizeData::get_border_box_size()` /
+  /// `get_content_box_size()` (dioxus-html-0.7.10 src/events/resize.rs:22-30).
+  record resize-data {
+    /// Padding plus border included (ResizeObserverEntry.borderBoxSize).
+    border-box: size,
+    /// The content box alone, borders and padding excluded
+    /// (ResizeObserverEntry.contentBoxSize).
+    content-box: size,
+  }
+
+  /// One IntersectionObserver entry for the observed element; every field
+  /// backs one accessor of dioxus-html's `VisibleData`
+  /// (dioxus-html-0.7.10 src/events/visible.rs:24-52).
+  record visible-data {
+    /// The target's own box at the moment of the observation
+    /// (IntersectionObserverEntry.boundingClientRect) — the denominator the
+    /// ratio below is a fraction of.
+    bounding-client-rect: rect,
+    /// How much of the target is visible, 0..1
+    /// (IntersectionObserverEntry.intersectionRatio); what a threshold-based
+    /// handler actually tests.
+    intersection-ratio: f64,
+    /// The visible part of the target (IntersectionObserverEntry
+    /// .intersectionRect); all-zero when nothing intersects.
+    intersection-rect: rect,
+    /// Whether the target intersects the root at all
+    /// (IntersectionObserverEntry.isIntersecting). Distinct from a nonzero
+    /// ratio: an entry fires on the transition *out* of view too.
+    is-intersecting: bool,
+    /// The root's clipping box (IntersectionObserverEntry.rootBounds).
+    /// `none` because the DOM reports null here when the root is the
+    /// implicit viewport and the document is in a cross-origin frame: the
+    /// viewport's geometry belongs to the parent document, so the browser
+    /// withholds it rather than leak it.
+    root-bounds: option<rect>,
+    /// Milliseconds since the Unix epoch, NOT since the page's time origin.
+    /// Fixed by dioxus-html: `VisibleData::get_time()` returns
+    /// `UNIX_EPOCH + Duration::from_millis(time_ms)`
+    /// (dioxus-html-0.7.10 src/events/visible.rs:203).
+    ///
+    /// DELIBERATE DEVIATION FROM UPSTREAM — do not "fix" this back.
+    /// `IntersectionObserverEntry.time` is a DOMHighResTimeStamp measured
+    /// from the page's time origin, so the host sends
+    /// `performance.timeOrigin + entry.time`. dioxus-web's own serializer
+    /// sends `Date.now() + detail.time` (dioxus-interpreter-js-0.7.10
+    /// src/ts/serialize.ts:164), which adds an epoch time to a
+    /// time-origin-relative one and so overshoots by the page's uptime.
+    time-ms: u64,
+  }
+
   variant payload {
     /// Events with no serialized data (focus/blur, select,
     /// toggle, click on non-interactive targets never carries less than
@@ -210,6 +275,8 @@ interface events {
     animation(animation-data),
     transition(transition-data),
     touch(touch-data),
+    resize(resize-data),
+    visible(visible-data),
   }
 
   /// A live DOM event, lent to the guest for the duration of one

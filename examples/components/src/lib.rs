@@ -32,7 +32,10 @@
 //! MountedData section's `#demo-scrollbox` / `#demo-measure` /
 //! `#demo-scroll` with its readouts `#rect-width` / `#rect-height` /
 //! `#scroll-height` / `#scroll-top`, plus `#demo-scroll-into-view` /
-//! `#scroll-to-status` / `#demo-scroll-target`.
+//! `#scroll-to-status` / `#demo-scroll-target`; and the observer sections'
+//! `#demo-resize-box` / `#demo-resize-toggle` with its readouts
+//! `#resize-width` / `#resize-height`, and `#demo-visible-target` with its
+//! readouts `#visible-intersecting` / `#visible-ratio`.
 
 mod jsfree;
 
@@ -69,6 +72,25 @@ fn app() -> Element {
     let mut scroll_top = use_signal(|| UNMEASURED);
     let mut scroll_target: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut scroll_to_status = use_signal(|| "scroll-to-idle");
+
+    // Observer section state. `resize_wide` drives the observed element's
+    // inline width; the two readouts hold whatever the last ResizeObserver
+    // delivery reported.
+    let mut resize_wide = use_signal(|| false);
+    let mut resize_width = use_signal(|| UNMEASURED);
+    let mut resize_height = use_signal(|| UNMEASURED);
+    let mut visible_intersecting = use_signal(|| "visible-unknown");
+    let mut visible_ratio = use_signal(|| UNMEASURED as f64);
+
+    // Inline `style:` rather than Tailwind width classes: harness/components.css
+    // is a generated artifact, so a class that isn't already in it would not
+    // exist at runtime. Reading `resize_wide()` here subscribes the component,
+    // so the click re-renders with the other width and the observer fires.
+    let resize_box_style = if resize_wide() {
+        "background-color: #e5e5e5; width: 240px; height: 96px"
+    } else {
+        "background-color: #e5e5e5; width: 160px; height: 96px"
+    };
 
     rsx! {
         div { id: "showcase", class: "p-6 flex flex-col gap-8",
@@ -302,6 +324,112 @@ fn app() -> Element {
                         onmounted: move |evt| scroll_target.set(Some(evt.data())),
                         "Scroll target"
                     }
+                }
+            }
+
+            section {
+                h2 { "onresize (ResizeObserver)" }
+                // The real-browser witness for `onresize`. Host-side unit
+                // tests run under linkedom, which has no ResizeObserver at
+                // all, so they synthesize entry objects by hand: they prove
+                // the serializer's arithmetic and nothing about whether an
+                // observer is ever created, ever observes this element, or
+                // ever delivers a callback. Only a real browser can show
+                // that.
+                //
+                // Deterministic by construction: the observed box's size is
+                // set by inline `style:` in absolute pixels, never derived
+                // from the viewport, so the numbers below are exact
+                // constants the e2e lane can assert. Width (160 or 240) and
+                // height (96) are all DIFFERENT — a writing-mode mapping
+                // that transposed inline/block onto height/width would
+                // report 96 for the width and fail loudly instead of
+                // looking plausible.
+                //
+                // ResizeObserver fires once immediately on observe with the
+                // element's initial size, so the readouts must leave the
+                // UNMEASURED sentinel with no user interaction at all; that
+                // first delivery is itself the proof the observer exists.
+                div { class: "flex flex-col gap-2 items-start",
+                    div {
+                        id: "demo-resize-box",
+                        // No border and no padding, so the border box is
+                        // exactly these two numbers under Tailwind
+                        // preflight's global `box-sizing: border-box`.
+                        style: "{resize_box_style}",
+                        onresize: move |evt| {
+                            // `get_border_box_size` -> ResizeResult<PixelsSize>
+                            // (dioxus-html-0.7.10 src/events/resize.rs:22-25).
+                            // An Err writes the QUERY_FAILED sentinel rather
+                            // than leaving the previous reading in place, so
+                            // a failure is visible instead of passing quietly.
+                            match evt.get_border_box_size() {
+                                Ok(size) => {
+                                    resize_width.set(size.width.round() as i64);
+                                    resize_height.set(size.height.round() as i64);
+                                }
+                                Err(_) => {
+                                    resize_width.set(QUERY_FAILED);
+                                    resize_height.set(QUERY_FAILED);
+                                }
+                            }
+                        },
+                    }
+                    button {
+                        id: "demo-resize-toggle",
+                        class: "rounded-md border px-3 py-1.5 text-sm",
+                        onclick: move |_| resize_wide.set(!resize_wide()),
+                        "Toggle width"
+                    }
+                    dl { class: "grid grid-cols-2 gap-x-4 text-sm",
+                        dt { "observed border box width" }
+                        dd { id: "resize-width", "{resize_width}" }
+                        dt { "observed border box height" }
+                        dd { id: "resize-height", "{resize_height}" }
+                    }
+                }
+            }
+
+            section {
+                h2 { "onvisible (IntersectionObserver)" }
+                // The real-browser witness for `onvisible`, for the same
+                // reason as the section above: linkedom has no
+                // IntersectionObserver, so the host-side unit tests feed the
+                // serializer hand-built entries and can say nothing about
+                // whether an observer is created or fires.
+                //
+                // IntersectionObserver also delivers an initial callback on
+                // observe, so this element — pushed below the fold with the
+                // same `mt-[120vh]` technique as #demo-scroll-target, which
+                // makes "off-screen at load" independent of window size —
+                // must report NOT intersecting before anything is scrolled,
+                // and flip to intersecting once it is scrolled into view.
+                // Both states are rendered because the flip is the proof: a
+                // single state could be a constant.
+                div {
+                    id: "demo-visible-target",
+                    class: "mt-[120vh] rounded-md border p-2 text-sm",
+                    onvisible: move |evt| {
+                        // `is_intersecting` / `get_intersection_ratio` ->
+                        // VisibleResult<_> (dioxus-html-0.7.10
+                        // src/events/visible.rs:31-42).
+                        visible_intersecting.set(match evt.is_intersecting() {
+                            Ok(true) => "visible-yes",
+                            Ok(false) => "visible-no",
+                            Err(_) => "visible-failed",
+                        });
+                        visible_ratio.set(match evt.get_intersection_ratio() {
+                            Ok(ratio) => ratio,
+                            Err(_) => QUERY_FAILED as f64,
+                        });
+                    },
+                    "Visibility target"
+                }
+                dl { class: "grid grid-cols-2 gap-x-4 text-sm",
+                    dt { "is intersecting" }
+                    dd { id: "visible-intersecting", "{visible_intersecting}" }
+                    dt { "intersection ratio" }
+                    dd { id: "visible-ratio", "{visible_ratio}" }
                 }
             }
 
