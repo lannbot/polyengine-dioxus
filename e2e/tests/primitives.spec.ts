@@ -166,10 +166,79 @@ test("primitives example: gallery mounts, switch/tabs/accordion interactions wor
   const calendarDays = page.locator("#demo-p-calendar [role=\"gridcell\"], #demo-p-calendar button");
   expect(await calendarDays.count(), "calendar must render a populated grid").toBeGreaterThan(20);
 
-  // Drag-and-drop list: the items render. Dragging is NOT asserted — the drop
-  // target is decided by an eval-installed document listener, so mouse drag
-  // cannot work here (keyboard reordering is the working path upstream).
-  expect(await page.locator(".dx-dnd-list-item").count(), "dnd list must render its items").toBe(3);
+  // Drag-and-drop list. The <ul>'s own `ondragover`/`ondrop`
+  // (drag_and_drop_list.rs:448-458) decide the reorder with no eval; the
+  // eval installed at drag_and_drop_list.rs:673 only adds document-level
+  // acceptance so a release OUTSIDE the list still commits — that remains
+  // unasserted here.
+  const dndItems = page.locator(".dx-dnd-list-item");
+  expect(await dndItems.count(), "dnd list must render its items").toBe(3);
+  const dndItemText = async () => dndItems.allTextContents();
+  expect(await dndItemText(), "dnd list initial order").toEqual([
+    "Ship the roadmap",
+    "Redesign onboarding",
+    "Audit webhook logs",
+  ]);
+
+  // (a) Mouse drag honours which HALF of the target item you drop on —
+  // regression coverage for host/src/events.ts previously dispatching
+  // drag-family events with `{ kind: "empty" }` (no coordinates), which
+  // made `event.client_coordinates().y` always read 0.0 and upstream's
+  // ondragover always choose "Before". Both of the following used to land
+  // the dragged item at index 1 regardless of which edge was targeted.
+  const lastItem = dndItems.nth(2);
+  const lastBox = await lastItem.boundingBox();
+  if (!lastBox) throw new Error("last dnd item has no bounding box");
+  await dndItems.nth(0).dragTo(lastItem, { targetPosition: { x: lastBox.width / 2, y: lastBox.height - 2 } });
+  expect(await dndItemText(), "dropping on the BOTTOM half of the last item must land it last").toEqual([
+    "Redesign onboarding",
+    "Audit webhook logs",
+    "Ship the roadmap",
+  ]);
+
+  const firstItem = dndItems.nth(0);
+  const firstBox = await firstItem.boundingBox();
+  if (!firstBox) throw new Error("first dnd item has no bounding box");
+  await dndItems.nth(2).dragTo(firstItem, { targetPosition: { x: firstBox.width / 2, y: 2 } });
+  expect(await dndItemText(), "dropping on the TOP half of the first item must land it first, restoring order")
+    .toEqual([
+      "Ship the roadmap",
+      "Redesign onboarding",
+      "Audit webhook logs",
+    ]);
+
+  // (b) A keyboard grab shows a drop indicator — regression coverage for
+  // examples/primitives/src/lib.rs's DndItems having overridden
+  // DragAndDropListItems' children and omitted the DragAndDropDropIndicator
+  // pair that harness/primitives.css:2152-2205 keys ALL drop feedback off
+  // of (`.dx-drop-indicator[data-position=…] + .dx-dnd-list-item`).
+  expect(await page.locator(".dx-drop-indicator").count(), "no drop indicators before a grab").toBe(0);
+  await dndItems.nth(0).focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("ArrowDown");
+  const dropIndicators = page.locator(".dx-drop-indicator");
+  expect(await dropIndicators.count(), "exactly one drop indicator while grabbed and moved").toBe(1);
+  await expect(dropIndicators).toHaveAttribute("data-position", "after");
+  // The indicator is a sibling immediately preceding the item it sits
+  // before — assert it lands between "Redesign onboarding" and "Audit
+  // webhook logs", not just that some indicator exists somewhere.
+  const indicatorNextSibling = await dropIndicators.evaluate((el) => el.nextElementSibling?.textContent);
+  expect(indicatorNextSibling, "drop indicator must sit directly before \"Audit webhook logs\"").toContain(
+    "Audit webhook logs",
+  );
+
+  // (c) The keyboard reorder commits on a second Enter: order updates,
+  // indicators clear, and the live region announces the move.
+  await page.keyboard.press("Enter");
+  expect(await dndItemText(), "keyboard reorder must commit").toEqual([
+    "Redesign onboarding",
+    "Ship the roadmap",
+    "Audit webhook logs",
+  ]);
+  expect(await page.locator(".dx-drop-indicator").count(), "drop indicators must clear after committing").toBe(0);
+  await expect(page.locator("[aria-live]")).toHaveText(
+    "You have dropped the item. It has moved from position 1 to position 2",
+  );
 
   // 6) Dialog interaction: the trigger opens it and the content appears.
   // Deliberately NOT asserted: escape-to-close, outside-click dismissal and

@@ -458,6 +458,56 @@ Deno.test("serializePayload: previously-misclassified names map to their real fa
   assertEquals(kindOf("auxclick"), "pointer");
 });
 
+// dioxus-html-0.7.10 generated.rs Drag(DragData) events= list: drag, dragend,
+// dragenter, dragexit, dragleave, dragover, dragstart, drop. DragData
+// implements HasMouseData, and DOM drag events are MouseEvents, so these
+// route to the `mouse` family (src/events.rs's `Drag(wit::MouseData)`
+// adapter is the guest-side half of this).
+Deno.test("serializePayload: drag family serializes as mouse (dnd reorder needs client-y)", () => {
+  const payload = serializePayload("dragover", {
+    type: "dragover",
+    clientX: 30,
+    clientY: 40,
+    button: 0,
+    buttons: 1,
+    altKey: true,
+  }) as { kind: string; value: Record<string, unknown> };
+  assertEquals(payload, {
+    kind: "mouse",
+    value: {
+      clientX: 30,
+      clientY: 40,
+      pageX: 0,
+      pageY: 0,
+      screenX: 0,
+      screenY: 0,
+      offsetX: 0,
+      offsetY: 0,
+      button: 0,
+      buttons: 1,
+      mods: { alt: true },
+    },
+  });
+});
+
+Deno.test("serializePayload: every drag-family name maps to mouse", () => {
+  const kindOf = (name: string) => (serializePayload(name, { type: name }) as { kind: string }).kind;
+  for (
+    const name of [
+      "drag",
+      "dragend",
+      "dragenter",
+      "dragexit",
+      "dragleave",
+      "dragover",
+      "dragstart",
+      "drop",
+    ]
+  ) {
+    assertEquals(kindOf(name), "mouse", `${name} should map to mouse`);
+  }
+});
+
 // -- synthetic `mounted` -----------------------------------------------------
 //
 // wit/world.wit (`handle-event`): `mounted` is SYNTHETIC — no such DOM event
