@@ -25,6 +25,13 @@
 import { parseHTML } from "linkedom";
 import { mountApp } from "../host/src/host.ts";
 import type { Mounted } from "../host/src/host.ts";
+import type { UntranslatedArtifacts } from "@deltic/runtime/embedder";
+
+/** Taken from the embedder's own type rather than restated, so this stays
+ * pinned to what `mountApp`'s `source` actually accepts. (The `unknown` it
+ * replaces did not hide the stale call shape below — `deno check` reports it
+ * fine; nothing was running `deno check` over bench/. See deno.json.) */
+type Translator = UntranslatedArtifacts["translator"];
 
 export const RUNS = 5;
 // Below this, for an op touching >=1000 rows, the number is not credible
@@ -199,11 +206,15 @@ export function median(xs: number[]): number {
 async function freshMount(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
 ): Promise<{ root: Element; mounted: Mounted; errors: unknown[] }> {
   const root = makeRoot();
   const errors: unknown[] = [];
-  const mounted = await mountApp({ componentBytes, translator, root, onError: (err) => errors.push(err) });
+  const mounted = await mountApp({
+    source: { componentBytes, translator },
+    root,
+    onError: (err) => errors.push(err),
+  });
   await waitFor(() => root.querySelector("#row-count") !== null, `${t}: initial mount`);
   if (errors.length > 0) {
     throw new Error(`${t}: onError fired during mount: ${Deno.inspect(errors)}`);
@@ -377,7 +388,7 @@ const MAX_ATTEMPTS_PER_OP = 3;
 export async function runOp(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
   op: OpDef,
 ): Promise<number> {
   let lastErr: unknown;
@@ -405,7 +416,7 @@ export async function runOp(
 async function runOpOnce(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
   op: OpDef,
 ): Promise<number> {
   const { root, mounted } = await freshMount(t, componentBytes, translator);

@@ -11,7 +11,7 @@
     "lib": ["deno.ns", "dom", "dom.iterable", "esnext"]
   },
   "tasks": {
-    "check": "deno check host/src host/tests",
+    "check": "deno check host/src host/tests bench",
     "test": "deno test --allow-read=. host/tests/",
     "bench": "bash bench/run.sh"
   }
