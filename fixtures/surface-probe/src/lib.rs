@@ -432,6 +432,19 @@ impl Guest for Component {
         reader
     }
 
+    /// This fixture exercises the byte channel only. `run-typed` is the
+    /// other half of the spike's A/B (wit/world.wit: exactly one of
+    /// `run`/`run-typed` is called per instance), and nothing here mounts
+    /// through it — so this arm exists to satisfy the trait and closes the
+    /// stream immediately by dropping the write end.
+    async fn run_typed() -> wit_bindgen::rt::async_support::StreamReader<
+        polymorph::dioxus::mutations::Operation,
+    > {
+        let (writer, reader) = wit_stream::new::<polymorph::dioxus::mutations::Operation>();
+        drop(writer);
+        reader
+    }
+
     async fn handle_event(_target: u32, name: u16, payload: Payload, ev: &HostDomEvent) {
         let (ops, strings, prevent) = build_event_batch(name, &payload);
 

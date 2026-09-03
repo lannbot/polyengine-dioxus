@@ -25,21 +25,29 @@
 import { parseHTML } from "linkedom";
 import { mountApp } from "../host/src/host.ts";
 import type { Mounted } from "../host/src/host.ts";
+import { defaultTranslator } from "@deltic/translator";
+
+type Translator = Awaited<ReturnType<typeof defaultTranslator>>;
 
 export const RUNS = 5;
 // Below this, for an op touching >=1000 rows, the number is not credible
 // (dispatch: "an unexplainable number is a bug lead, not a result").
 export const SANITY_FLOOR_MS = 0.5;
 
-export type TransportName = "stream";
-export const TRANSPORTS: TransportName[] = ["stream"];
+// The two mutation channels (wit/world.wit `run` vs `run-typed`) A/B'd
+// against each other — see "Transport A/B" in bench/README.md. Both use the
+// SAME component build (one `.wasm`, two exports): `mountApp`'s `channel`
+// option picks which export/decode path is used, so there is only one
+// componentPath.
+export type TransportName = "bytes" | "typed";
+export const TRANSPORTS: TransportName[] = ["bytes", "typed"];
 
-export function componentPath(t: TransportName): string {
-  return new URL(`./build/bench-rows-${t}.component.wasm`, import.meta.url).pathname;
+export function componentPath(): string {
+  return new URL(`./build/bench-rows.component.wasm`, import.meta.url).pathname;
 }
 
-export async function loadComponentBytes(t: TransportName): Promise<Uint8Array> {
-  const path = componentPath(t);
+export async function loadComponentBytes(): Promise<Uint8Array> {
+  const path = componentPath();
   try {
     return await Deno.readFile(path);
   } catch (e) {
@@ -199,11 +207,16 @@ export function median(xs: number[]): number {
 async function freshMount(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
 ): Promise<{ root: Element; mounted: Mounted; errors: unknown[] }> {
   const root = makeRoot();
   const errors: unknown[] = [];
-  const mounted = await mountApp({ componentBytes, translator, root, onError: (err) => errors.push(err) });
+  const mounted = await mountApp({
+    source: { componentBytes, translator },
+    root,
+    channel: t,
+    onError: (err) => errors.push(err),
+  });
   await waitFor(() => root.querySelector("#row-count") !== null, `${t}: initial mount`);
   if (errors.length > 0) {
     throw new Error(`${t}: onError fired during mount: ${Deno.inspect(errors)}`);
@@ -377,7 +390,7 @@ const MAX_ATTEMPTS_PER_OP = 3;
 export async function runOp(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
   op: OpDef,
 ): Promise<number> {
   let lastErr: unknown;
@@ -405,7 +418,7 @@ export async function runOp(
 async function runOpOnce(
   t: TransportName,
   componentBytes: Uint8Array,
-  translator: unknown,
+  translator: Translator,
   op: OpDef,
 ): Promise<number> {
   const { root, mounted } = await freshMount(t, componentBytes, translator);

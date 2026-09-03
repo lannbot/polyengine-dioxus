@@ -296,6 +296,161 @@ interface events {
   }
 }
 
+/// The explicit-schema alternative to the byte format documented on `run`:
+/// the same op vocabulary, spelled as WIT records and one `operation`
+/// variant, delivered as `stream<operation>` by `run-typed`. Exactly one of
+/// the two channels is used per instance; the host picks at mount. This
+/// interface exists so the two encodings can be benchmarked against each
+/// other — the byte format on `run` remains the measurement baseline and is
+/// unchanged.
+///
+/// Semantics are inherited wholesale from `run`'s doc comment: element ids
+/// are Dioxus ElementIds (slab indices, id 0 = mount root), `m` is the
+/// "top m nodes of the stack" count, `path` is a list of child indices,
+/// stack semantics are Dioxus's mutation-stack semantics, and `bubbles` on
+/// the listener ops is dioxus-html's `event_bubbles` verdict (the host keys
+/// its root-delegated vs per-element strategy off it). Interning is
+/// unchanged too: a `str-ref` is an id defined by a prior `cache-string`
+/// operation, in this batch or any earlier one, and the guest emits each
+/// definition exactly once per instance.
+///
+/// Three representational differences from the byte format, all forced:
+///
+/// - **`option<str-ref>` replaces the `0xffff` sentinel** at the type level:
+///   a namespace operand's optionality is expressed by the type rather than
+///   by a reserved id value. Note this does NOT free the id: both channels
+///   assign ids from one `Interner`, whose guard still refuses to hand out
+///   `0xffff` (src/protocol.rs `intern_raw`), so the typed channel inherits
+///   the byte format's 65535-string ceiling without getting anything for it.
+/// - **`register-template` carries an arena, not a tree.** The natural
+///   shape is recursive — `record template-element { children:
+///   list<template-node> }` — and WIT forbids it: recursive type
+///   definitions are rejected outright (`wasm-tools`: "type `template-node`
+///   depends on itself"). So `nodes` is a flat pre-order list, `roots` and
+///   every element's `children` are `u32` indices into it, and the host
+///   rebuilds the tree by indexing. This is a real expressiveness limit of
+///   the typed schema and a cost the byte format does not pay: its `node`
+///   grammar is self-delimiting and recursive at no charge. It also means
+///   the typed form admits malformed arenas (out-of-range or cyclic
+///   indices) that the byte grammar cannot express.
+/// - **The world's `use mutations.{operation}` makes this interface an
+///   import of every component built against the world**, whether or not it
+///   mounts the typed channel: `wasm-tools component wit` on a guest shows
+///   `import polymorph:dioxus/mutations@0.4.0` alongside `events` and `dom`.
+///   Nothing needs supplying (the interface has no items — the import
+///   exists only to name the types), but it is a change to the *byte*
+///   channel's own component type: a host that only ever calls `run` still
+///   sees a new entry in the instantiation surface. Adding a typed channel
+///   is therefore not free for guests that never use it.
+///
+/// (Version note: this interface is added to `polymorph:dioxus@0.4.0`
+/// without a package bump, deliberately, and that is a real shortcut rather
+/// than a formality. `app` gained a *required* export, so `0.4.0` now
+/// denotes two mutually incompatible worlds: any guest already built
+/// against the old 0.4.0 no longer satisfies it, and the mismatch is not
+/// detectable by version. `fixtures/surface-probe` needing a stub
+/// `run-typed` arm to keep compiling is that incompatibility showing up in
+/// the small. The shortcut is taken because this is a spike branch
+/// evaluating the typed channel and a bump rewrites every interface id in
+/// the host wiring, swamping the change under measurement — but it must not
+/// be carried forward: whichever way the spike lands, the result ships with
+/// a version bump.)
+
+interface mutations {
+  /// An interned string id, defined by a prior `cache-string` operation.
+  type str-ref = u16;
+  /// A Dioxus ElementId (slab index; dense). 0 is the mount root.
+  type element-id = u32;
+
+  /// Define (or overwrite) interned slot `id`. Ids are guest-managed and
+  /// assigned monotonically from 0.
+  record cache-string { id: str-ref, str: string }
+
+  /// One *static* template attribute. Dynamic template attributes are not
+  /// part of the template; they arrive later as `set-attribute`.
+  record template-attr { name: str-ref, ns: option<str-ref>, value: string }
+
+  /// `children` are indices into the enclosing `register-template`'s
+  /// `nodes` arena — see the interface doc for why this is not a tree.
+  record template-element {
+    tag: str-ref,
+    ns: option<str-ref>,
+    attrs: list<template-attr>,
+    children: list<u32>,
+  }
+
+  variant template-node {
+    element(template-element),
+    text(string),
+    /// A runtime-supplied node slot; the host materializes a placeholder
+    /// that later ops (`assign-id` / `replace-placeholder`) address by path.
+    dynamic,
+  }
+
+  /// Register a static template, which the host materializes once
+  /// (detached) so `load-template` can clone root subtrees from it. Each
+  /// distinct template is sent once, before its first use.
+  ///
+  /// `nodes` is the arena; `roots` indexes into it.
+  record register-template {
+    id: u16,
+    nodes: list<template-node>,
+    roots: list<u32>,
+  }
+
+  /// An element id plus a stack count ("top m nodes").
+  record stack-op { id: element-id, m: u32 }
+  /// A template path plus a stack count.
+  record path-op { path: list<u8>, m: u32 }
+  record assign-id { path: list<u8>, id: element-id }
+  record create-text-node { id: element-id, text: string }
+  record load-template { id: element-id, tmpl: u16, root: u16 }
+  record set-text { id: element-id, text: string }
+
+  /// The byte format's `attrval` kinds. `none` removes the attribute
+  /// unconditionally (it is not an empty text value); the host applies the
+  /// same property-reset rules `run`'s doc comment spells out.
+  variant attr-value {
+    text(string),
+    float(f64),
+    int(s64),
+    boolean(bool),
+    none,
+  }
+
+  record set-attribute {
+    id: element-id,
+    name: str-ref,
+    ns: option<str-ref>,
+    value: attr-value,
+  }
+
+  record event-listener { id: element-id, name: str-ref, bubbles: bool }
+
+  /// One mutation. The arms are the byte format's opcodes in opcode order
+  /// (0x01 cache-string through 0x11 push-root); arms whose only operand is
+  /// an element id carry it bare.
+  variant operation {
+    cache-string(cache-string),
+    register-template(register-template),
+    append-children(stack-op),
+    assign-id(assign-id),
+    create-placeholder(element-id),
+    create-text-node(create-text-node),
+    load-template(load-template),
+    replace-with(stack-op),
+    replace-placeholder(path-op),
+    insert-after(stack-op),
+    insert-before(stack-op),
+    set-attribute(set-attribute),
+    set-text(set-text),
+    new-event-listener(event-listener),
+    remove-event-listener(event-listener),
+    remove(element-id),
+    push-root(element-id),
+  }
+}
+
 /// Operations on live elements the guest cannot express declaratively.
 ///
 /// Everything else in this world flows one way: the guest describes DOM
@@ -379,6 +534,7 @@ interface dom {
 /// dispatches DOM events via `handle-event`.
 world app {
   use events.{payload, dom-event};
+  use mutations.{operation};
 
   import events;
   import dom;
@@ -524,6 +680,31 @@ world app {
   /// `surface.open`, alongside a since-retired synchronous call transport —
   /// see bench/README.md for the retirement record.)
   export run: async func() -> stream<u8>;
+
+  /// The typed twin of `run`: the same channel with the explicit schema of
+  /// the `mutations` interface instead of the hand-rolled byte format.
+  ///
+  /// Lifecycle is identical in every respect — it returns the read end and
+  /// spawns the scheduler as a separate task (see `run`'s doc for why the
+  /// scheduler cannot live in the export's own body, and why nothing may be
+  /// written before the reader is returned), initial mount is one batch, and
+  /// each subsequent render flushes one batch. One batch is one stream
+  /// write of the whole `list<operation>`: writes-per-batch is the thing
+  /// being measured, so it stays at one on both channels.
+  ///
+  /// **Exactly one of `run` / `run-typed` is called per instance** — the
+  /// host picks the channel at mount. Calling both is not supported: they
+  /// would share one VirtualDom and one interner, and each would see half
+  /// the mutations.
+  ///
+  /// Unlike `stream<u8>`, a typed stream has no zero-copy direct-read path
+  /// (polyengine amendment A21's `readDirect` is `stream<u8>` only, since it
+  /// hands the callback a view aliasing guest linear memory and only a byte
+  /// stream *has* a memory representation to alias). The host therefore
+  /// reads this one with an ordinary `read()`, paying lift/lower for every
+  /// record — which is precisely the cost the benchmark is here to
+  /// quantify.
+  export run-typed: async func() -> stream<operation>;
 
   /// Dispatch one DOM event to the listener registered on `target` (the
   /// ElementId carried by new-event-listener) for the interned event name

@@ -16,6 +16,8 @@ import { DispatchGate } from "./dispatch.ts";
 import { FrameDecoder } from "./decoder.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
+import { applyTyped } from "./typed.ts";
+import type { OperationLifted } from "./typed.ts";
 
 export interface MountOptions {
   /** Component artifacts in either form `instantiate` accepts: a
@@ -27,6 +29,12 @@ export interface MountOptions {
    * verbatim to `instantiate`. */
   source: InstantiateSource;
   root: Element;
+  /** Which mutation channel to mount on. Defaults to "bytes". "typed" uses
+   * the explicit-WIT-schema channel (`run-typed` / `stream<operation>`,
+   * wit/world.wit `interface mutations`) instead of the hand-rolled byte
+   * format on `run`. Added to A/B the two encodings (bench/README.md); the
+   * byte channel remains the baseline and is unaffected by this option. */
+  channel?: "bytes" | "typed";
   /** Asynchronous failure after a successful mount: the mutation stream's
    * parked direct-read session rejecting (guest trap — `PeerTrappedError` —
    * or teardown), or a `handle-event` call rejecting. A failure during mount
@@ -401,45 +409,98 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
 
   handleEventExport = instance.exports.handleEvent as (...a: unknown[]) => unknown;
 
-  // `run` starts the app and returns the mutation channel's read end; its
-  // promise settles as soon as the guest hands the reader back (the app's
-  // scheduler keeps running as a spawned guest task). A trap before the
-  // return rejects here and propagates out of `mountApp`.
-  const ops = await (instance.exports.run as () => Promise<Stream<Uint8Array>>)();
+  // `run`/`run-typed` start the app and return the mutation channel's read
+  // end; the promise settles as soon as the guest hands the reader back
+  // (the app's scheduler keeps running as a spawned guest task). A trap
+  // before the return rejects here and propagates out of `mountApp`.
+  const channel = opts.channel ?? "bytes";
+  const ops = channel === "typed"
+    ? await (instance.exports.runTyped as () => Promise<Stream<OperationLifted>>)()
+    : await (instance.exports.run as () => Promise<Stream<Uint8Array>>)();
 
-  // Park a direct-read session for the instance's lifetime. We always consume
-  // the FULL view per rendezvous — whole frames decoded+applied, any partial
-  // tail staged in the FrameDecoder — so `readDirect`'s "never acknowledge
-  // zero bytes" hazard (embedder-api.md amendment A21) never arises:
-  // `markRead` always receives `view.length`, never 0.
-  const consume = (src: DirectSource): "more" | "done" => {
-    const view = src.remaining();
-    // The callback runs DOM application only (decodeBatch via the
-    // FrameDecoder) — no direct guest call. But DOM application can fire
-    // synchronous NATIVE events (detaching a focused element fires
-    // `focusout`), whose listeners would dispatch into the guest from
-    // inside this rendezvous. The gate enforces the A21 rule ("calls that
-    // can run guest code ... are forbidden" inside a direct-read callback)
-    // transitively: dispatches raised in this window are queued and drained
-    // by a microtask, once the rendezvous' guest turn has unwound.
-    gate.beginApply();
-    try {
-      const n = frameDecoder.feed(view);
-      if (n < view.length) {
-        frameDecoder.stashRest(view, n);
+  if (channel === "typed") {
+    // Unlike `stream<u8>`, a typed stream has no zero-copy direct-read path
+    // (embedder-api.md amendment A21's `readDirect` is `stream<u8>` only —
+    // wit/world.wit's `run-typed` doc). Read with an ordinary `read()`
+    // instead.
+    //
+    // The guest scheduler's persistent park between renders needs SOME
+    // host-side reason the store's deadlock verdict stays suppressed
+    // (embedder-api.md amendment A15, "Deadlock-verdict suppression tracks
+    // host retention": suppression holds "while the host retains a way to
+    // act on a stream/future — a retained end, a parked host operation, or
+    // an unfinished producer pump"). Here that's the first disjunct, not the
+    // second: `mountApp` holds the lifted readable end (`ops`/`typedStream`)
+    // for the instance's whole lifetime — never lowered back into the guest
+    // — which is retention-by-itself, independent of whether a `read()`
+    // happens to be in flight at any given instant. (Runtime-side, this is
+    // `HostActivity` arming on the retained end and disarming only on a
+    // lower-back-to-guest — .deps/polyengine/runtime/src/exec/
+    // host_streams.ts ~lines 295-318.) So, unlike the byte channel's parked
+    // `readDirect` session — which genuinely IS "a parked host operation"
+    // for as long as it runs — there being a brief gap here with no read
+    // outstanding (the await resumption between one `read()`'s chunk
+    // landing and `applyTyped` finishing, before the next `read()` is
+    // issued) is not itself a hazard: retention already covers it.
+    //
+    // The next read is still issued immediately after applying a chunk,
+    // with no unnecessary work in between — good practice for latency, not
+    // a correctness requirement.
+    //
+    // MAX_TYPED_READ must be large enough that a whole batch (up to ~40k
+    // operations for the 10k-row bench case) arrives in one chunk.
+    const MAX_TYPED_READ = 1 << 22;
+    const typedStream = ops as Stream<OperationLifted>;
+    (async () => {
+      while (!disposed) {
+        const chunk = await typedStream.read(MAX_TYPED_READ);
+        if (chunk.length === 0) break; // end of stream
+        gate.beginApply();
+        try {
+          applyTyped(chunk, applier);
+        } finally {
+          gate.endApply();
+        }
       }
-    } finally {
-      gate.endApply();
-    }
-    src.markRead(view.length);
-    return "more";
-  };
-  // The session only settles on stream end/drop/fault, which for a healthy
-  // long-lived app never happens in normal operation. Route a rejection (peer
-  // trap, teardown) to onError rather than letting it become unhandled.
-  ops.readDirect(consume).catch((err: unknown) => {
-    if (!disposed) onError(err);
-  });
+    })().catch((err: unknown) => {
+      if (!disposed) onError(err);
+    });
+  } else {
+    const byteStream = ops as Stream<Uint8Array>;
+    // Park a direct-read session for the instance's lifetime. We always consume
+    // the FULL view per rendezvous — whole frames decoded+applied, any partial
+    // tail staged in the FrameDecoder — so `readDirect`'s "never acknowledge
+    // zero bytes" hazard (embedder-api.md amendment A21) never arises:
+    // `markRead` always receives `view.length`, never 0.
+    const consume = (src: DirectSource): "more" | "done" => {
+      const view = src.remaining();
+      // The callback runs DOM application only (decodeBatch via the
+      // FrameDecoder) — no direct guest call. But DOM application can fire
+      // synchronous NATIVE events (detaching a focused element fires
+      // `focusout`), whose listeners would dispatch into the guest from
+      // inside this rendezvous. The gate enforces the A21 rule ("calls that
+      // can run guest code ... are forbidden" inside a direct-read callback)
+      // transitively: dispatches raised in this window are queued and drained
+      // by a microtask, once the rendezvous' guest turn has unwound.
+      gate.beginApply();
+      try {
+        const n = frameDecoder.feed(view);
+        if (n < view.length) {
+          frameDecoder.stashRest(view, n);
+        }
+      } finally {
+        gate.endApply();
+      }
+      src.markRead(view.length);
+      return "more";
+    };
+    // The session only settles on stream end/drop/fault, which for a healthy
+    // long-lived app never happens in normal operation. Route a rejection (peer
+    // trap, teardown) to onError rather than letting it become unhandled.
+    byteStream.readDirect(consume).catch((err: unknown) => {
+      if (!disposed) onError(err);
+    });
+  }
 
   const mounted: Mounted = {
     applier,

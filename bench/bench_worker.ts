@@ -8,10 +8,10 @@
 // whole bench run; bench.ts renders that op as "N/A" and the failure is
 // reported plainly, not hidden.
 //
-// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName> <stream>
+// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName> <bytes|typed>
 
 import { defaultTranslator } from "@deltic/translator";
-import { loadComponentBytes, ops, runOp } from "./ops.ts";
+import { loadComponentBytes, ops, runOp, TRANSPORTS } from "./ops.ts";
 import type { TransportName } from "./ops.ts";
 
 async function main() {
@@ -20,13 +20,13 @@ async function main() {
   if (!op) {
     throw new Error(`unknown op "${opName}"; known ops: ${ops.map((o) => o.name).join(", ")}`);
   }
-  if (transportArg !== "stream") {
-    throw new Error(`transport must be "stream", got "${transportArg}"`);
+  if (!(TRANSPORTS as string[]).includes(transportArg)) {
+    throw new Error(`transport must be one of ${TRANSPORTS.join(", ")}, got "${transportArg}"`);
   }
-  const transport: TransportName = transportArg;
+  const transport = transportArg as TransportName;
 
   const translator = await defaultTranslator();
-  const bytes = await loadComponentBytes(transport);
+  const bytes = await loadComponentBytes();
   try {
     const medianMs = await runOp(transport, bytes, translator, op);
     console.log(JSON.stringify({ op: opName, transport, medianMs }));

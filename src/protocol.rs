@@ -392,16 +392,25 @@ impl Interner {
         Interner { ids: FxHashMap::default(), names: Vec::new() }
     }
 
-    /// Return the interned id for `s`, emitting `cache-string` into `batch`
-    /// on first sight of this pointer identity.
+    /// Return the interned id for `s`, plus whether *this* call is the one
+    /// that defined it (i.e. whether the caller owes the wire a
+    /// `cache-string` for it).
+    ///
+    /// This is the emission-agnostic core of interning: the id space, the
+    /// pointer-identity keying and the reverse map live here, and each
+    /// encoder decides how to emit the definition. [`Self::intern`] is the
+    /// byte encoder's wrapper; `typed::TypedWriter` pushes an
+    /// `Operation::CacheString` instead. Only one encoder is live per
+    /// instance (`run` xor `run-typed`, per `wit/world.wit`), so an id is
+    /// never defined on one channel and referenced on the other.
     ///
     /// Panics if more than `u16::MAX - 1` distinct strings are interned
     /// (id `0xffff` is reserved as the `strref` "none" sentinel, so it must
     /// never be assigned).
-    pub fn intern(&mut self, batch: &mut Batch, s: &'static str) -> u16 {
+    pub fn intern_raw(&mut self, s: &'static str) -> (u16, bool) {
         let key = (s.as_ptr() as usize, s.len());
         if let Some(&id) = self.ids.get(&key) {
-            return id;
+            return (id, false);
         }
         let next = self.names.len();
         assert!(
@@ -413,7 +422,19 @@ impl Interner {
         let id = next as u16;
         self.ids.insert(key, id);
         self.names.push(s);
-        batch.cache_string(id, s);
+        (id, true)
+    }
+
+    /// Return the interned id for `s`, emitting `cache-string` into `batch`
+    /// on first sight of this pointer identity.
+    ///
+    /// Panics if more than `u16::MAX - 1` distinct strings are interned
+    /// (see [`Self::intern_raw`]).
+    pub fn intern(&mut self, batch: &mut Batch, s: &'static str) -> u16 {
+        let (id, is_new) = self.intern_raw(s);
+        if is_new {
+            batch.cache_string(id, s);
+        }
         id
     }
 

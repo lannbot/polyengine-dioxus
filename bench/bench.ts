@@ -6,18 +6,20 @@
 // retries — see bench/ops.ts's runOp doc); that renders as "N/A" in the
 // table rather than aborting the whole run or fabricating a number.
 //
-// Methodology and interpretation guardrails: bench/README.md. This bench
-// tracks stream-transport throughput only — the call transport was
-// retired after the historical A/B recorded in bench/README.md's
-// "Transport A/B (historical)" section.
+// This bench A/Bs the two mutation channels (`run`'s hand-rolled byte
+// format vs `run-typed`'s explicit WIT schema, wit/world.wit) against each
+// other, over the same component build — restoring the two-column shape
+// documented in bench/README.md's "Transport A/B" section (the earlier A/B
+// there compared the byte channel against the since-retired "call"
+// transport; this one compares it against the typed channel instead).
 
 import { ops, TRANSPORTS } from "./ops.ts";
 import type { TransportName } from "./ops.ts";
 
 interface OpResult {
   op: string;
-  medianMs: number | null;
-  error?: string;
+  medianMs: Record<TransportName, number | null>;
+  error: Record<TransportName, string | undefined>;
 }
 
 async function runWorker(opName: string, transport: TransportName): Promise<{ medianMs: number | null; error?: string }> {
@@ -44,9 +46,20 @@ async function runWorker(opName: string, transport: TransportName): Promise<{ me
 
 async function benchAll(): Promise<OpResult[]> {
   const results: OpResult[] = [];
-  const transport = TRANSPORTS[0];
-  for (const op of ops) {
-    const { medianMs, error } = await runWorker(op.name, transport);
+  for (const [i, op] of ops.entries()) {
+    const medianMs = {} as Record<TransportName, number | null>;
+    const error = {} as Record<TransportName, string | undefined>;
+    // Alternate which transport runs first per op (rather than always
+    // "bytes" then "typed") so any drift over the run (thermal, background
+    // GC, whatever) does not land preferentially on one channel. Each op
+    // still runs in its own process per transport, so there is no shared
+    // state to worry about — this only removes a fixed ordering bias.
+    const order = i % 2 === 0 ? TRANSPORTS : [...TRANSPORTS].reverse();
+    for (const transport of order) {
+      const r = await runWorker(op.name, transport);
+      medianMs[transport] = r.medianMs;
+      error[transport] = r.error;
+    }
     results.push({ op: op.name, medianMs, error });
   }
   return results;
@@ -56,19 +69,34 @@ function fmtMs(ms: number | null): string {
   return ms === null ? "N/A" : ms.toFixed(2);
 }
 
+function fmtRatio(bytesMs: number | null, typedMs: number | null): string {
+  if (bytesMs === null || typedMs === null || bytesMs === 0) return "N/A";
+  return `${(typedMs / bytesMs).toFixed(2)}x`;
+}
+
 function renderTable(results: OpResult[]): string {
-  const header = "| op | ms (median of 5) |";
-  const sep = "| --- | --- |";
-  const rows = results.map((r) => `| ${r.op} | ${fmtMs(r.medianMs)} |`);
+  const header = "| op | bytes (ms, median of 5) | typed (ms, median of 5) | typed / bytes |";
+  const sep = "| --- | --- | --- | --- |";
+  const rows = results.map((r) =>
+    `| ${r.op} | ${fmtMs(r.medianMs.bytes)} | ${fmtMs(r.medianMs.typed)} | ${
+      fmtRatio(r.medianMs.bytes, r.medianMs.typed)
+    } |`
+  );
   const table = [header, sep, ...rows].join("\n");
-  const failureNotes = results.filter((r) => r.error).map((r) => `- **${r.op}**: ${r.error}`);
+  const failureNotes = results.flatMap((r) =>
+    TRANSPORTS.filter((t) => r.error[t]).map((t) => `- **${r.op}** (${t}): ${r.error[t]}`)
+  );
   if (failureNotes.length === 0) return table;
   return table + "\n\n### N/A explanations\n\n" + failureNotes.join("\n");
 }
 
 async function gitRev(): Promise<string> {
+  // `git describe --always --dirty` rather than `rev-parse --short HEAD`:
+  // this whole spike is uncommitted, so a bare HEAD rev would claim a
+  // pre-spike commit that has no `run-typed` in it at all — the `--dirty`
+  // suffix makes that visible instead of silently misleading.
   try {
-    const cmd = new Deno.Command("git", { args: ["rev-parse", "--short", "HEAD"], stdout: "piped" });
+    const cmd = new Deno.Command("git", { args: ["describe", "--always", "--dirty"], stdout: "piped" });
     const { stdout } = await cmd.output();
     return new TextDecoder().decode(stdout).trim() || "unknown";
   } catch {

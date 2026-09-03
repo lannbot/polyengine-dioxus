@@ -4,11 +4,14 @@
 //!   and dynamic strings) matching the wire format documented in
 //!   `wit/world.wit`.
 //! - [`writer`]: the `dioxus_core::WriteMutations` sink that fills a batch.
-//! - `bindings` / `driver` / `events` (wasm32 only): the generated WIT
-//!   bindings, the `run`/`handle-event` implementation, and the
-//!   `HtmlEventConverter` over the WIT payload types. These are gated on
-//!   `target_arch = "wasm32"` so `cargo test` can exercise the encoder and
-//!   writer natively.
+//! - `bindings` / `driver` / `events` / `typed` (wasm32 only): the generated
+//!   WIT bindings, the `run`/`run-typed`/`handle-event` implementation, the
+//!   `HtmlEventConverter` over the WIT payload types, and the
+//!   `WriteMutations` sink for the typed channel's `stream<operation>`.
+//!   These are gated on `target_arch = "wasm32"` so `cargo test` can
+//!   exercise the encoder and writer natively. `typed` names the generated
+//!   bindings and so is not covered by `cargo test`; it is kept obviously
+//!   parallel to [`writer`] and checked host-side for equivalence.
 //!
 //! An application crate wires itself up with [`launch!`].
 
@@ -21,3 +24,5 @@ pub mod bindings;
 pub mod driver;
 #[cfg(target_arch = "wasm32")]
 pub mod events;
+#[cfg(target_arch = "wasm32")]
+pub mod typed;
