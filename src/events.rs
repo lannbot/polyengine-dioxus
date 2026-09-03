@@ -13,10 +13,12 @@
 //!
 //! # What "families we don't carry" means
 //!
-//! The WIT `payload` variant has seven arms; dioxus-html has 21 data families.
-//! A `convert_*` for an uncarried family (drag, touch, composition, clipboard,
-//! media, animation, transition, image, resize, visible, selection, toggle,
-//! cancel) has no data to work from, so it returns that family's
+//! The WIT `payload` variant has twelve arms; dioxus-html has 21 data
+//! families. A `convert_*` for an uncarried family (focus, cancel, clipboard,
+//! media, selection, toggle — whose dioxus-html data types expose no
+//! accessors at all — plus resize and visible, which dioxus synthesizes from
+//! observers this renderer never runs) has no data to work from, so it
+//! returns that family's
 //! empty/neutral value — the same thing a renderer returns when the platform
 //! does not supply the information. Those events still *dispatch*: a handler
 //! runs, it just sees zeroed data. This is a deliberate, visible gap rather
@@ -45,8 +47,9 @@ use dioxus_html::{
     FormValue, HasAnimationData, HasCancelData, HasClipboardData, HasCompositionData, HasDragData,
     HasFileData, HasFocusData, HasFormData, HasImageData, HasKeyboardData, HasMediaData,
     HasMouseData, HasPointerData, HasResizeData, HasScrollData, HasSelectionData, HasToggleData,
-    HasTouchData, HasTransitionData, HasVisibleData, HasWheelData, HtmlEventConverter, ImageData,
-    Key, KeyboardData, MediaData, Modifiers, MountedData, MountedError, MountedResult, MouseData,
+    HasTouchData, HasTouchPointData, HasTransitionData, HasVisibleData, HasWheelData,
+    HtmlEventConverter, ImageData, Key, KeyboardData, MediaData, Modifiers, MountedData,
+    MountedError, MountedResult, MouseData,
     PlatformEventData, PointerData, RenderedElementBacking, ResizeData, ScrollData, SelectionData,
     ScrollBehavior, ScrollLogicalPosition, ScrollToOptions, ToggleData, TouchData, TouchPoint,
     TransitionData, VisibleData, WheelData,
@@ -394,9 +397,138 @@ impl HasScrollData for Scroll {
     }
 }
 
+/// `load`/`error` on a resource element. The DOM splits these into two event
+/// names; dioxus-html folds them into one family whose single accessor asks
+/// which of the two it was.
+struct Image(wit::ImageData);
+
+impl HasImageData for Image {
+    fn load_error(&self) -> bool {
+        self.0.load_error
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// An IME composition step; `data` is the text the input method contributed.
+struct Composition(wit::CompositionData);
+
+impl HasCompositionData for Composition {
+    fn data(&self) -> String {
+        self.0.data.clone()
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A CSS animation lifecycle event: which animation, on which pseudo-element,
+/// how far in.
+struct Animation(wit::AnimationData);
+
+impl HasAnimationData for Animation {
+    fn animation_name(&self) -> String {
+        self.0.animation_name.clone()
+    }
+    fn pseudo_element(&self) -> String {
+        self.0.pseudo_element.clone()
+    }
+    fn elapsed_time(&self) -> f32 {
+        self.0.elapsed_time
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A CSS transition lifecycle event; one per animated property.
+struct Transition(wit::TransitionData);
+
+impl HasTransitionData for Transition {
+    fn property_name(&self) -> String {
+        self.0.property_name.clone()
+    }
+    fn pseudo_element(&self) -> String {
+        self.0.pseudo_element.clone()
+    }
+    fn elapsed_time(&self) -> f32 {
+        self.0.elapsed_time
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// One finger. `HasTouchPointData` is `InteractionLocation` plus the
+/// touch-specific geometry (dioxus-html-0.7.10 src/events/touch.rs:252-267);
+/// note the radius is returned as a single `ScreenPoint` built from the DOM's
+/// two radius axes.
+struct TouchPointData(wit::TouchPoint);
+
+impl InteractionLocation for TouchPointData {
+    fn client_coordinates(&self) -> ClientPoint {
+        ClientPoint::new(self.0.client_x, self.0.client_y)
+    }
+    fn screen_coordinates(&self) -> ScreenPoint {
+        ScreenPoint::new(self.0.screen_x, self.0.screen_y)
+    }
+    fn page_coordinates(&self) -> PagePoint {
+        PagePoint::new(self.0.page_x, self.0.page_y)
+    }
+}
+
+impl HasTouchPointData for TouchPointData {
+    fn identifier(&self) -> i32 {
+        self.0.identifier
+    }
+    fn force(&self) -> f64 {
+        self.0.force
+    }
+    fn radius(&self) -> ScreenPoint {
+        ScreenPoint::new(self.0.radius_x, self.0.radius_y)
+    }
+    fn rotation(&self) -> f64 {
+        self.0.rotation_angle
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A touch event: three views of the fingers involved, plus the keyboard
+/// modifiers `HasTouchData`'s `ModifiersInteraction` supertrait asks for.
+struct Touch(wit::TouchData);
+
+fn touch_points(points: &[wit::TouchPoint]) -> Vec<TouchPoint> {
+    points.iter().map(|p| TouchPoint::new(TouchPointData(*p))).collect()
+}
+
+impl ModifiersInteraction for Touch {
+    fn modifiers(&self) -> Modifiers {
+        modifiers(self.0.mods)
+    }
+}
+
+impl HasTouchData for Touch {
+    fn touches(&self) -> Vec<TouchPoint> {
+        touch_points(&self.0.touches)
+    }
+    fn touches_changed(&self) -> Vec<TouchPoint> {
+        touch_points(&self.0.changed_touches)
+    }
+    fn target_touches(&self) -> Vec<TouchPoint> {
+        touch_points(&self.0.target_touches)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
 /// The neutral backing for every family the wire does not carry. It also
 /// stands in for a payload arm that does not match the requested family.
 struct Empty;
+
 
 macro_rules! empty_as_any {
     ($($t:ty),* $(,)?) => {$(
@@ -838,8 +970,11 @@ impl HtmlEventConverter for WitEventConverter {
         FocusData::new(Empty)
     }
 
-    fn convert_animation_data(&self, _: &PlatformEventData) -> AnimationData {
-        AnimationData::new(Empty)
+    fn convert_animation_data(&self, event: &PlatformEventData) -> AnimationData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Animation(a)) => AnimationData::new(Animation(a.clone())),
+            _ => AnimationData::new(Empty),
+        }
     }
 
     fn convert_cancel_data(&self, _: &PlatformEventData) -> CancelData {
@@ -850,12 +985,18 @@ impl HtmlEventConverter for WitEventConverter {
         ClipboardData::new(Empty)
     }
 
-    fn convert_composition_data(&self, _: &PlatformEventData) -> CompositionData {
-        CompositionData::new(Empty)
+    fn convert_composition_data(&self, event: &PlatformEventData) -> CompositionData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Composition(c)) => CompositionData::new(Composition(c.clone())),
+            _ => CompositionData::new(Empty),
+        }
     }
 
-    fn convert_image_data(&self, _: &PlatformEventData) -> ImageData {
-        ImageData::new(Empty)
+    fn convert_image_data(&self, event: &PlatformEventData) -> ImageData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Image(i)) => ImageData::new(Image(*i)),
+            _ => ImageData::new(Empty),
+        }
     }
 
     fn convert_media_data(&self, _: &PlatformEventData) -> MediaData {
@@ -883,12 +1024,18 @@ impl HtmlEventConverter for WitEventConverter {
         ToggleData::new(Empty)
     }
 
-    fn convert_touch_data(&self, _: &PlatformEventData) -> TouchData {
-        TouchData::new(Empty)
+    fn convert_touch_data(&self, event: &PlatformEventData) -> TouchData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Touch(t)) => TouchData::new(Touch(t.clone())),
+            _ => TouchData::new(Empty),
+        }
     }
 
-    fn convert_transition_data(&self, _: &PlatformEventData) -> TransitionData {
-        TransitionData::new(Empty)
+    fn convert_transition_data(&self, event: &PlatformEventData) -> TransitionData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Transition(t)) => TransitionData::new(Transition(t.clone())),
+            _ => TransitionData::new(Empty),
+        }
     }
 
     fn convert_visible_data(&self, _: &PlatformEventData) -> VisibleData {

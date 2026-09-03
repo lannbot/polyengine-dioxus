@@ -576,6 +576,133 @@ Deno.test("mounted: fires once per registration, not again on later events", () 
   assertEquals(calls.length, 2);
 });
 
+// -- new families: image/composition/animation/transition/touch ------------
+
+// dioxus-html-0.7.10 generated.rs Image(ImageData) events= list
+// (generated.rs:108-113): `onerror => error, onload => load`. `load-error`
+// has no field on the native event — it is derived from which of the two
+// names fired.
+Deno.test("serializePayload: image family — loadError true for error, false for load", () => {
+  const errPayload = serializePayload("error", { type: "error" });
+  assertEquals(errPayload, { kind: "image", value: { loadError: true } });
+
+  const loadPayload = serializePayload("load", { type: "load" });
+  assertEquals(loadPayload, { kind: "image", value: { loadError: false } });
+});
+
+Deno.test("serializePayload: composition family", () => {
+  const payload = serializePayload("compositionupdate", {
+    type: "compositionupdate",
+    // deno-lint-ignore no-explicit-any
+    data: "こ",
+  } as any);
+  assertEquals(payload, { kind: "composition", value: { data: "こ" } });
+});
+
+Deno.test("serializePayload: composition family defensive default when data missing", () => {
+  const payload = serializePayload("compositionstart", { type: "compositionstart" });
+  assertEquals(payload, { kind: "composition", value: { data: "" } });
+});
+
+Deno.test("serializePayload: animation family", () => {
+  const payload = serializePayload("animationstart", {
+    type: "animationstart",
+    animationName: "fade",
+    pseudoElement: "::before",
+    elapsedTime: 1.5,
+    // deno-lint-ignore no-explicit-any
+  } as any);
+  assertEquals(payload, {
+    kind: "animation",
+    value: { animationName: "fade", pseudoElement: "::before", elapsedTime: 1.5 },
+  });
+});
+
+Deno.test("serializePayload: transition family", () => {
+  const payload = serializePayload("transitionend", {
+    type: "transitionend",
+    propertyName: "opacity",
+    pseudoElement: "",
+    elapsedTime: 0.3,
+    // deno-lint-ignore no-explicit-any
+  } as any);
+  assertEquals(payload, {
+    kind: "transition",
+    value: { propertyName: "opacity", pseudoElement: "", elapsedTime: 0.3 },
+  });
+});
+
+// TouchEvent.touches/changedTouches/targetTouches are TouchList — an
+// array-like (indexed + length, no array methods), not a real Array.
+function fakeTouchList(points: Record<string, number>[]): ArrayLike<Record<string, number>> {
+  const obj: Record<string | number, unknown> = { length: points.length };
+  points.forEach((p, i) => (obj[i] = p));
+  return obj as unknown as ArrayLike<Record<string, number>>;
+}
+
+Deno.test("serializePayload: touch family converts array-like TouchLists", () => {
+  const touches = fakeTouchList([
+    {
+      identifier: 1,
+      clientX: 10,
+      clientY: 20,
+      pageX: 11,
+      pageY: 21,
+      screenX: 12,
+      screenY: 22,
+      radiusX: 5,
+      radiusY: 6,
+      rotationAngle: 7,
+      force: 0.5,
+    },
+  ]);
+  const payload = serializePayload("touchstart", {
+    type: "touchstart",
+    touches,
+    changedTouches: touches,
+    targetTouches: fakeTouchList([]),
+    ctrlKey: true,
+  }) as { kind: string; value: Record<string, unknown> };
+  assertEquals(payload.kind, "touch");
+  assertEquals(payload.value.touches, [
+    {
+      identifier: 1,
+      clientX: 10,
+      clientY: 20,
+      pageX: 11,
+      pageY: 21,
+      screenX: 12,
+      screenY: 22,
+      radiusX: 5,
+      radiusY: 6,
+      rotationAngle: 7,
+      force: 0.5,
+    },
+  ]);
+  assertEquals(payload.value.targetTouches, [], "empty TouchList converts to empty array");
+  assertEquals(payload.value.mods, { ctrl: true });
+});
+
+Deno.test("serializePayload: touch family defensive defaults when touch lists are absent", () => {
+  const payload = serializePayload("touchend", { type: "touchend" }) as {
+    kind: string;
+    value: Record<string, unknown>;
+  };
+  assertEquals(payload.value.touches, []);
+  assertEquals(payload.value.changedTouches, []);
+  assertEquals(payload.value.targetTouches, []);
+});
+
+// dioxus-html-0.7.10 generated.rs: `oninvalid => invalid` (Form(FormData)
+// events= list, generated.rs:102) and the `doubleclick` raw alias
+// (Mouse(MouseData), generated.rs:256) were both previously unmapped
+// (fell through to `empty`).
+Deno.test("serializePayload: invalid maps to form, doubleclick maps to mouse", () => {
+  const kindOf = (name: string) => (serializePayload(name, { type: name }) as { kind: string }).kind;
+  assertEquals(kindOf("invalid"), "form");
+  assertEquals(kindOf("doubleclick"), "mouse");
+});
+
 Deno.test("mounted: each element gets its own single dispatch", () => {
   const { document, root } = makeRoot();
   const { sink, calls } = recordingSink();

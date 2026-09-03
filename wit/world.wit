@@ -13,15 +13,21 @@
 /// any change to opcodes, operand layouts, or framing bumps the package
 /// version (instantiation is digest-checked, so a mismatch fails loudly and
 /// early).
-package polymorph:dioxus@0.2.0;
+package polymorph:dioxus@0.3.0;
 
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
 /// construction (the family is chosen host-side by event name, mirroring
 /// dioxus-html's name→data-type mapping). Drag events reuse the `mouse`
-/// family (DOM drag events are MouseEvents). Families not yet covered
-/// (touch/composition/animation/media specifics) dispatch as `empty`
-/// in this version. `onmounted` also carries an `empty` payload, but is
+/// family (DOM drag events are MouseEvents). Some families dispatch as
+/// `empty` because there is nothing to carry: focus, cancel, clipboard,
+/// media, selection and toggle events have data types in dioxus-html that
+/// expose no accessors at all, so a handler can observe nothing beyond the
+/// fact that the event fired. Resize and visible are `empty` for a
+/// different reason: dioxus synthesizes them from ResizeObserver /
+/// IntersectionObserver, and this renderer never fires them.
+///
+/// `onmounted` also carries an `empty` payload, but is
 /// not "uncovered": its handler's value is the `MountedData` handle the
 /// guest builds from the dispatch's `target`, backed by the `dom`
 /// interface below.
@@ -101,8 +107,95 @@ interface events {
     client-height: f64,
   }
 
+  record image-data {
+    /// Whether the dispatched event was `error` rather than `load`. The DOM
+    /// gives these two names to one dioxus-html family, and this bool is the
+    /// only thing that distinguishes them for `ImageData::load_error()`;
+    /// without it an `onerror` handler is told the image loaded fine.
+    load-error: bool,
+  }
+
+  record composition-data {
+    /// The text the IME contributed for this compositionstart/update/end
+    /// (CompositionEvent.data), behind `CompositionData::data()`. Empty
+    /// string is legitimate — a composition can be cancelled to nothing.
+    data: string,
+  }
+
+  record animation-data {
+    /// Which @keyframes animation fired (AnimationEvent.animationName); the
+    /// only way a handler on an element with several animations can tell
+    /// them apart. `AnimationData::animation_name()`.
+    animation-name: string,
+    /// The pseudo-element the animation ran on ("::before", …), or "" when
+    /// it ran on the element itself (AnimationEvent.pseudoElement).
+    pseudo-element: string,
+    /// Seconds the animation had been running when the event fired,
+    /// excluding paused time (AnimationEvent.elapsedTime). f32 because
+    /// `AnimationData::elapsed_time()` is f32.
+    elapsed-time: f32,
+  }
+
+  record transition-data {
+    /// Which CSS property finished transitioning
+    /// (TransitionEvent.propertyName); a single `ontransitionend` listener
+    /// fires once per animated property. `TransitionData::property_name()`.
+    property-name: string,
+    /// The pseudo-element the transition ran on, or "" for the element
+    /// itself (TransitionEvent.pseudoElement).
+    pseudo-element: string,
+    /// Seconds the transition had been running when the event fired
+    /// (TransitionEvent.elapsedTime); f32, matching
+    /// `TransitionData::elapsed_time()`.
+    elapsed-time: f32,
+  }
+
+  /// One finger, mirroring the DOM `Touch` object. The field set is
+  /// dioxus-html's own `SerializedTouchPoint` (dioxus-html-0.7.10
+  /// src/events/touch.rs:272-284) — i.e. exactly what its
+  /// `HasTouchPointData` implementation needs and nothing more.
+  record touch-point {
+    /// Stable for the life of one finger's contact, so a handler can track
+    /// a finger across touchmove events (Touch.identifier).
+    identifier: s32,
+    /// The three coordinate spaces `InteractionLocation` requires of a touch
+    /// point: viewport, document, and physical screen.
+    client-x: f64,
+    client-y: f64,
+    page-x: f64,
+    page-y: f64,
+    screen-x: f64,
+    screen-y: f64,
+    /// Half-axes of the ellipse approximating the contact area
+    /// (Touch.radiusX/radiusY); `TouchPoint::radius()` returns them as one
+    /// point. 0 on hardware that does not report contact geometry.
+    radius-x: f64,
+    radius-y: f64,
+    /// Degrees (0..90) that the contact ellipse is rotated by
+    /// (Touch.rotationAngle), behind `TouchPoint::rotation()`.
+    rotation-angle: f64,
+    /// Contact pressure in 0..1 (Touch.force); 0 when unsupported.
+    force: f64,
+  }
+
+  record touch-data {
+    /// Every finger currently on the screen (TouchEvent.touches).
+    touches: list<touch-point>,
+    /// Only the fingers whose state this event reports
+    /// (TouchEvent.changedTouches) — behind
+    /// `TouchData::touches_changed()`, and the list a touchend handler
+    /// needs to know which finger lifted.
+    changed-touches: list<touch-point>,
+    /// The subset of `touches` that started on the event's target element
+    /// (TouchEvent.targetTouches).
+    target-touches: list<touch-point>,
+    /// Touch events carry keyboard modifiers too; `HasTouchData` requires
+    /// `ModifiersInteraction`.
+    mods: modifiers,
+  }
+
   variant payload {
-    /// Events with no serialized data (focus/blur, load/error, select,
+    /// Events with no serialized data (focus/blur, select,
     /// toggle, click on non-interactive targets never carries less than
     /// mouse — see family mapping in the host).
     empty,
@@ -112,6 +205,11 @@ interface events {
     wheel(wheel-data),
     form(form-data),
     scroll(scroll-data),
+    image(image-data),
+    composition(composition-data),
+    animation(animation-data),
+    transition(transition-data),
+    touch(touch-data),
   }
 
   /// A live DOM event, lent to the guest for the duration of one
