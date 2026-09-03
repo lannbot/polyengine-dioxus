@@ -13,12 +13,10 @@
 //!
 //! # What "families we don't carry" means
 //!
-//! The WIT `payload` variant has twelve arms; dioxus-html has 21 data
+//! The WIT `payload` variant has fourteen arms; dioxus-html has 21 data
 //! families. A `convert_*` for an uncarried family (focus, cancel, clipboard,
-//! media, selection, toggle — whose dioxus-html data types expose no
-//! accessors at all — plus resize and visible, which dioxus synthesizes from
-//! observers this renderer never runs) has no data to work from, so it
-//! returns that family's
+//! media, selection and toggle — whose dioxus-html data types expose no
+//! accessors at all) has no data to work from, so it returns that family's
 //! empty/neutral value — the same thing a renderer returns when the platform
 //! does not supply the information. Those events still *dispatch*: a handler
 //! runs, it just sees zeroed data. This is a deliberate, visible gap rather
@@ -50,12 +48,13 @@ use dioxus_html::{
     HasTouchData, HasTouchPointData, HasTransitionData, HasVisibleData, HasWheelData,
     HtmlEventConverter, ImageData, Key, KeyboardData, MediaData, Modifiers, MountedData,
     MountedError, MountedResult, MouseData,
-    PlatformEventData, PointerData, RenderedElementBacking, ResizeData, ScrollData, SelectionData,
-    ScrollBehavior, ScrollLogicalPosition, ScrollToOptions, ToggleData, TouchData, TouchPoint,
-    TransitionData, VisibleData, WheelData,
+    PlatformEventData, PointerData, RenderedElementBacking, ResizeData, ResizeResult, ScrollData,
+    SelectionData, ScrollBehavior, ScrollLogicalPosition, ScrollToOptions, ToggleData, TouchData,
+    TouchPoint, TransitionData, VisibleData, VisibleError, VisibleResult, WheelData,
 };
 use std::future::Future;
 use std::pin::Pin;
+use std::time::{Duration, SystemTime};
 
 use crate::bindings::polymorph::dioxus::dom;
 use crate::bindings::polymorph::dioxus::events as wit;
@@ -519,6 +518,68 @@ impl HasTouchData for Touch {
     }
     fn target_touches(&self) -> Vec<TouchPoint> {
         touch_points(&self.0.target_touches)
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A ResizeObserver entry. Both accessors are infallible here: the host only
+/// dispatches this family from an observer callback, which always has both
+/// boxes (`HasResizeData`, dioxus-html-0.7.10 src/events/resize.rs:115-127).
+struct Resize(wit::ResizeData);
+
+impl HasResizeData for Resize {
+    fn get_border_box_size(&self) -> ResizeResult<PixelsSize> {
+        Ok(PixelsSize::new(self.0.border_box.width, self.0.border_box.height))
+    }
+    fn get_content_box_size(&self) -> ResizeResult<PixelsSize> {
+        Ok(PixelsSize::new(self.0.content_box.width, self.0.content_box.height))
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// An IntersectionObserver entry (`HasVisibleData`, dioxus-html-0.7.10
+/// src/events/visible.rs:228-261).
+struct Visible(wit::VisibleData);
+
+fn pixels_rect(r: dom::Rect) -> PixelsRect {
+    PixelsRect::new(PixelsPoint::new(r.x, r.y), PixelsSize::new(r.width, r.height))
+}
+
+impl HasVisibleData for Visible {
+    fn get_bounding_client_rect(&self) -> VisibleResult<PixelsRect> {
+        Ok(pixels_rect(self.0.bounding_client_rect))
+    }
+    fn get_intersection_ratio(&self) -> VisibleResult<f64> {
+        Ok(self.0.intersection_ratio)
+    }
+    fn get_intersection_rect(&self) -> VisibleResult<PixelsRect> {
+        Ok(pixels_rect(self.0.intersection_rect))
+    }
+    fn is_intersecting(&self) -> VisibleResult<bool> {
+        Ok(self.0.is_intersecting)
+    }
+    fn get_root_bounds(&self) -> VisibleResult<PixelsRect> {
+        // CONTRACT: the wire says `option<rect>` because the DOM reports
+        // `rootBounds` as null for an implicit cross-origin viewport root,
+        // but dioxus's accessor has no way to say "absent" — it returns
+        // `VisibleResult<PixelsRect>`. `NotSupported` is the only honest
+        // mapping for `none`: the alternative, a zero rect, would be
+        // indistinguishable from a real degenerate root box.
+        self.0
+            .root_bounds
+            .map(pixels_rect)
+            .ok_or(VisibleError::NotSupported)
+    }
+    fn get_time(&self) -> VisibleResult<SystemTime> {
+        // `time_ms` is milliseconds since the Unix epoch by contract — the
+        // host adds `performance.timeOrigin` to the entry's page-relative
+        // timestamp — because that is the only reading under which this
+        // accessor's own arithmetic is correct (visible.rs:203).
+        Ok(SystemTime::UNIX_EPOCH + Duration::from_millis(self.0.time_ms))
     }
     fn as_any(&self) -> &dyn std::any::Any {
         self
@@ -1012,8 +1073,11 @@ impl HtmlEventConverter for WitEventConverter {
         }
     }
 
-    fn convert_resize_data(&self, _: &PlatformEventData) -> ResizeData {
-        ResizeData::new(Empty)
+    fn convert_resize_data(&self, event: &PlatformEventData) -> ResizeData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Resize(r)) => ResizeData::new(Resize(*r)),
+            _ => ResizeData::new(Empty),
+        }
     }
 
     fn convert_selection_data(&self, _: &PlatformEventData) -> SelectionData {
@@ -1038,7 +1102,10 @@ impl HtmlEventConverter for WitEventConverter {
         }
     }
 
-    fn convert_visible_data(&self, _: &PlatformEventData) -> VisibleData {
-        VisibleData::new(Empty)
+    fn convert_visible_data(&self, event: &PlatformEventData) -> VisibleData {
+        match payload(event).map(|p| &p.payload) {
+            Some(wit::Payload::Visible(v)) => VisibleData::new(Visible(*v)),
+            _ => VisibleData::new(Empty),
+        }
     }
 }

@@ -389,12 +389,12 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     ...wasi(),
     // Keyed by the verbatim interface id (contract:"Module wiring and
     // instantiation"), so the version tracks the WIT package version —
-    // now 0.3.0. `events`' sole host-implemented item is the `dom-event`
+    // now 0.4.0. `events`' sole host-implemented item is the `dom-event`
     // resource, named by its bindgen-emitted UpperCamel name
     // (contract:"Resources"); `dom`'s items are functions, named by their
     // bindgen-emitted lowerCamel names.
-    "polymorph:dioxus/events@0.3.0": { DomEvent },
-    "polymorph:dioxus/dom@0.3.0": createDomImports(applier, gate),
+    "polymorph:dioxus/events@0.4.0": { DomEvent },
+    "polymorph:dioxus/dom@0.4.0": createDomImports(applier, gate),
   };
 
   const instance = await instantiate(opts.source, imports);

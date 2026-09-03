@@ -386,3 +386,101 @@ test("components example: scroll_to brings an off-screen element into view", asy
   expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
   expect(pageErrors, "no uncaught page exceptions").toEqual([]);
 });
+
+// onresize / onvisible against real observers.
+//
+// A new test rather than an extension of an existing one: the subject is
+// different (the two synthesized observer event families, not
+// MountedData's element queries) and, like the scroll_to test, it depends
+// on the page starting at the top — the "not intersecting yet" assertion
+// below is only meaningful before any click has auto-scrolled the page.
+//
+// `resize` and `visible` are not DOM events; the host synthesizes them
+// from a ResizeObserver and an IntersectionObserver. The host-side unit
+// tests run under linkedom, which has neither, so they hand-build entry
+// objects: they cover the serializer's arithmetic and cannot say whether
+// an observer is ever constructed, ever observes the element, or ever
+// delivers a callback. This test is the only thing that can.
+test("components example: onresize/onvisible are driven by real observers", async ({ page }) => {
+  const consoleErrors: string[] = [];
+  page.on("console", (msg) => {
+    if (msg.type() !== "error") return;
+    const text = msg.text();
+    if (BENIGN_CONSOLE_PATTERNS.some((re) => re.test(text))) return;
+    consoleErrors.push(text);
+  });
+  const pageErrors: string[] = [];
+  page.on("pageerror", (err) => pageErrors.push(err.stack ?? err.message));
+
+  await page.goto(baseUrl());
+  await page.waitForFunction(() => (globalThis as unknown as { __mounted?: boolean }).__mounted === true, {
+    timeout: 15_000,
+  });
+  await expect(page.locator("#showcase")).toBeVisible();
+
+  const resizeWidth = page.locator("#resize-width");
+  const resizeHeight = page.locator("#resize-height");
+  const visIntersecting = page.locator("#visible-intersecting");
+  const visRatio = page.locator("#visible-ratio");
+
+  // --- Initial delivery on observe ---------------------------------------
+  // Both observers invoke their callback once as soon as they observe an
+  // element, so both readouts must leave their sentinels with no user
+  // interaction whatsoever. That alone establishes that the observers were
+  // actually constructed and wired to these elements.
+  //
+  // The example sets #demo-resize-box to exactly 160x96 CSS px via inline
+  // `style:` (never a viewport-relative unit), with no border or padding,
+  // so under `box-sizing: border-box` the border box is exactly those two
+  // numbers on any viewport. 160 and 96 are deliberately different: a
+  // writing-mode mapping that transposed inlineSize/blockSize onto
+  // width/height would report 96 here and fail.
+  await expect(resizeWidth).toHaveText("160");
+  await expect(resizeHeight).toHaveText("96");
+
+  // #demo-visible-target sits a full 120vh below its section, so it is
+  // off-screen at load regardless of window size — the initial
+  // IntersectionObserver callback must therefore report not-intersecting.
+  // "visible-unknown" is the example's never-observed sentinel; seeing it
+  // here would mean the observer never fired.
+  await expect(visIntersecting).toHaveText("visible-no");
+  const ratioBefore = Number(await visRatio.textContent());
+  console.log(`observers: initial intersection ratio ${ratioBefore}`);
+  expect(ratioBefore, "an off-screen element has zero intersection ratio").toBe(0);
+
+  // --- Resize fires on change, with correct numbers ----------------------
+  // The toggle switches the inline width to 240px; the height is untouched.
+  // Asserting both catches a handler that writes one field from the other.
+  await page.locator("#demo-resize-toggle").click();
+  await expect(resizeWidth).toHaveText("240");
+  await expect(resizeHeight).toHaveText("96");
+
+  // And back, so the readout is proven to track the element rather than
+  // having latched a second constant.
+  await page.locator("#demo-resize-toggle").click();
+  await expect(resizeWidth).toHaveText("160");
+  await expect(resizeHeight).toHaveText("96");
+
+  // --- Visible flips when the target enters the viewport -----------------
+  // The flip is the proof: a readout stuck at one state could be a
+  // constant. Scrolling is done by the browser, not by the guest, so this
+  // exercises the observer itself rather than any scroll API.
+  await page.locator("#demo-visible-target").scrollIntoViewIfNeeded();
+  await expect(visIntersecting).toHaveText("visible-yes");
+  // The target is a ~30px bordered box now fully inside the viewport, so
+  // the ratio must be essentially 1. expect.poll auto-waits (no fixed
+  // sleep) because the observer may deliver an entry mid-scroll first.
+  await expect.poll(async () => Number(await visRatio.textContent()), {
+    message: "a fully in-view target must report an intersection ratio of ~1",
+  }).toBeGreaterThan(0.9);
+  const ratioAfter = Number(await visRatio.textContent());
+  console.log(`observers: intersection ratio after scrolling into view ${ratioAfter}`);
+  expect(ratioAfter, "intersection ratio is a fraction, never above 1").toBeLessThanOrEqual(1);
+
+  const collectedErrors = await page.evaluate(() =>
+    (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
+  );
+  expect(collectedErrors, "no onError/window.onerror/unhandledrejection ever fired").toEqual([]);
+  expect(pageErrors, "no uncaught page exceptions").toEqual([]);
+  expect(consoleErrors, "no console.error output").toEqual([]);
+});

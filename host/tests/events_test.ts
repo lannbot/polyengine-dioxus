@@ -441,8 +441,11 @@ Deno.test("serializePayload: scroll family reads scrollable metrics off the targ
 });
 
 Deno.test("serializePayload: unmapped event names dispatch as empty", () => {
-  assertEquals(serializePayload("resize", { type: "resize" }), { kind: "empty" });
-  assertEquals(serializePayload("visible", { type: "visible" }), { kind: "empty" });
+  // `resize`/`visible` used to be the examples here; they now have real
+  // payload families (see the observer-backed section at the end of this
+  // file), so the assertion moved onto names that are still unmapped.
+  assertEquals(serializePayload("focus", { type: "focus" }), { kind: "empty" });
+  assertEquals(serializePayload("blur", { type: "blur" }), { kind: "empty" });
 });
 
 // dioxus-html-0.7.10 generated.rs name->data-type mapping: reset->Form,
@@ -718,4 +721,355 @@ Deno.test("mounted: each element gets its own single dispatch", () => {
 
   assertEquals(calls.length, 2);
   assertEquals(calls.map((c) => c.elementId), [1, 2]);
+});
+
+// -- observer-backed `resize` / `visible` -------------------------------------
+//
+// Neither is a DOM event: dioxus-web synthesizes them from a ResizeObserver /
+// IntersectionObserver (ref:core.ts:109-113). Both are non-bubbling
+// (dioxus-core-types-0.7.10/src/bubbles.rs:87,102).
+
+/** `ResizeObserverEntry.borderBoxSize`/`.contentBoxSize` are ARRAYS of
+ * writing-mode-relative `{ blockSize, inlineSize }`. */
+function boxSize(inlineSize: number, blockSize: number) {
+  return [{ inlineSize, blockSize }];
+}
+
+Deno.test("serializePayload: resize family resolves inline/block in horizontal-tb", () => {
+  const payload = serializePayload("resize", {
+    type: "resize",
+    borderBoxSize: boxSize(100, 50),
+    contentBoxSize: boxSize(90, 40),
+    // no getComputedStyle in linkedom -> defaults to horizontal-tb, where
+    // inlineSize is the width.
+  });
+  assertEquals(payload, {
+    kind: "resize",
+    value: {
+      borderBox: { width: 100, height: 50 },
+      contentBox: { width: 90, height: 40 },
+    },
+  });
+});
+
+Deno.test("serializePayload: resize family swaps inline/block in a vertical writing mode", () => {
+  const { document, root } = makeRoot();
+  const el = document.createElement("div");
+  root.appendChild(el);
+
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  const had = "getComputedStyle" in g;
+  const prev = g.getComputedStyle;
+  g.getComputedStyle = () => ({ writingMode: "vertical-rl" });
+  try {
+    const payload = serializePayload("resize", {
+      type: "resize",
+      target: el as unknown as EventTarget,
+      borderBoxSize: boxSize(100, 50),
+      contentBoxSize: boxSize(90, 40),
+    });
+    assertEquals(payload, {
+      kind: "resize",
+      value: {
+        // vertical-rl: inlineSize runs down the page, so it is the HEIGHT.
+        borderBox: { width: 50, height: 100 },
+        contentBox: { width: 40, height: 90 },
+      },
+    });
+  } finally {
+    if (had) g.getComputedStyle = prev;
+    else delete g.getComputedStyle;
+  }
+});
+
+Deno.test("serializePayload: resize family falls back to contentRect when box arrays absent", () => {
+  const payload = serializePayload("resize", {
+    type: "resize",
+    contentRect: { x: 0, y: 0, width: 12, height: 34 },
+  });
+  assertEquals(payload, {
+    kind: "resize",
+    value: {
+      borderBox: { width: 12, height: 34 },
+      contentBox: { width: 12, height: 34 },
+    },
+  });
+});
+
+Deno.test("serializePayload: resize family defensive defaults when the entry is empty", () => {
+  assertEquals(serializePayload("resize", { type: "resize" }), {
+    kind: "resize",
+    value: { borderBox: { width: 0, height: 0 }, contentBox: { width: 0, height: 0 } },
+  });
+});
+
+Deno.test("serializePayload: visible family maps entry fields across", () => {
+  const payload = serializePayload("visible", {
+    type: "visible",
+    boundingClientRect: { x: 1, y: 2, width: 3, height: 4 },
+    intersectionRatio: 0.5,
+    intersectionRect: { x: 5, y: 6, width: 7, height: 8 },
+    isIntersecting: true,
+    rootBounds: { x: 9, y: 10, width: 11, height: 12 },
+    time: 0,
+  }) as { kind: string; value: Record<string, unknown> };
+  assertEquals(payload.kind, "visible");
+  assertEquals(payload.value.boundingClientRect, { x: 1, y: 2, width: 3, height: 4 });
+  assertEquals(payload.value.intersectionRatio, 0.5);
+  assertEquals(payload.value.intersectionRect, { x: 5, y: 6, width: 7, height: 8 });
+  assertEquals(payload.value.isIntersecting, true);
+  assertEquals(payload.value.rootBounds, { x: 9, y: 10, width: 11, height: 12 });
+});
+
+// `IntersectionObserverEntry.rootBounds` is null when the root is an
+// implicit cross-origin viewport; wit `option<rect>` lowers as `undefined`.
+Deno.test("serializePayload: visible family maps rootBounds null to undefined", () => {
+  const payload = serializePayload("visible", {
+    type: "visible",
+    rootBounds: null,
+  }) as { kind: string; value: Record<string, unknown> };
+  assertEquals(payload.value.rootBounds, undefined);
+  assertEquals("rootBounds" in payload.value, true, "field present, value undefined");
+  // Defensive defaults for a partial entry, like every other family.
+  assertEquals(payload.value.boundingClientRect, { x: 0, y: 0, width: 0, height: 0 });
+  assertEquals(payload.value.isIntersecting, false);
+});
+
+// DELIBERATE DEVIATION from ref:serialize.ts:163 (`Date.now() + detail.time`):
+// the guest reads time-ms as ms since the Unix epoch, and `entry.time` is
+// measured from the page's TIME ORIGIN, so the correct sum is
+// `performance.timeOrigin + entry.time`. Upstream's overshoots by uptime.
+Deno.test("serializePayload: visible timeMs converts from the time origin, not Date.now", () => {
+  const time = 1234.7;
+  const payload = serializePayload("visible", { type: "visible", time }) as {
+    value: { timeMs: bigint };
+  };
+  // A BigInt, not a number: wit `time-ms` is u64, and the component-model
+  // binding rejects a JS number for a 64-bit integer at dispatch time
+  // ("u64 expects a bigint"). Asserting the type here is what keeps this
+  // suite honest — it synthesizes events and never crosses the real
+  // boundary, so a plain number would pass this file and throw in a browser.
+  assertEquals(typeof payload.value.timeMs, "bigint");
+  assertEquals(payload.value.timeMs, BigInt(Math.floor(performance.timeOrigin + time)));
+  // And it is NOT the upstream formula: Date.now() already includes the
+  // page's uptime, so that sum lands a full uptime in the future.
+  const upstream = BigInt(Math.floor(Date.now() + time));
+  assertEquals(
+    payload.value.timeMs < upstream,
+    true,
+    "time-origin conversion must not include the page uptime twice",
+  );
+});
+
+Deno.test("resize/visible: registration degrades safely with no observers available", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  // linkedom provides neither constructor — the environment every host unit
+  // test runs in.
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  assertEquals(typeof g.ResizeObserver, "undefined");
+  assertEquals(typeof g.IntersectionObserver, "undefined");
+
+  const el = document.createElement("div");
+  root.appendChild(el);
+
+  let nativeAdds = 0;
+  const realAdd = el.addEventListener.bind(el);
+  el.addEventListener = (...args: Parameters<typeof realAdd>) => {
+    nativeAdds++;
+    return realAdd(...args);
+  };
+  let rootAdds = 0;
+  const realRootAdd = root.addEventListener.bind(root);
+  root.addEventListener = (...args: Parameters<typeof realRootAdd>) => {
+    rootAdds++;
+    return realRootAdd(...args);
+  };
+
+  // event_bubbles is false for both, so they arrive as non-bubbling adds.
+  dispatcher.add(el, 8, 50, "resize", false);
+  dispatcher.add(el, 8, 51, "visible", false);
+
+  assertEquals(nativeAdds, 0, "no native listener for an observer-backed name");
+  assertEquals(rootAdds, 0, "and none delegated at the root either");
+  assertEquals(calls, [], "nothing fires without an observer");
+  assertEquals(el.getAttribute("data-dioxus-id"), "8");
+
+  // Teardown paths must tolerate the degraded registration.
+  dispatcher.remove(el, 8, 50, "resize", false);
+  dispatcher.purge(8, el);
+  dispatcher.dispose();
+  assertEquals(calls, []);
+});
+
+// Observer stubs: linkedom has none, so the lifecycle tests below supply a
+// minimal recording pair for the duration of the test.
+function stubObservers() {
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  const log: string[] = [];
+  const instances: { disconnected: boolean }[] = [];
+  class Stub {
+    disconnected = false;
+    #kind: string;
+    constructor(kind: string) {
+      this.#kind = kind;
+      instances.push(this);
+    }
+    observe(el: Element) {
+      log.push(`${this.#kind}:observe:${el.getAttribute("data-dioxus-id")}`);
+    }
+    unobserve(el: Element) {
+      log.push(`${this.#kind}:unobserve:${el.getAttribute("data-dioxus-id")}`);
+    }
+    disconnect() {
+      this.disconnected = true;
+      log.push(`${this.#kind}:disconnect`);
+    }
+  }
+  g.ResizeObserver = class extends Stub {
+    constructor() {
+      super("resize");
+    }
+  };
+  g.IntersectionObserver = class extends Stub {
+    constructor() {
+      super("visible");
+    }
+  };
+  return {
+    log,
+    instances,
+    restore() {
+      delete g.ResizeObserver;
+      delete g.IntersectionObserver;
+    },
+  };
+}
+
+Deno.test("resize/visible: one shared observer each, observed per element", () => {
+  const { document, root } = makeRoot();
+  const { sink } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+  const { log, instances, restore } = stubObservers();
+  try {
+    const a = document.createElement("div");
+    const b = document.createElement("div");
+    root.appendChild(a);
+    root.appendChild(b);
+
+    dispatcher.add(a, 1, 50, "resize", false);
+    dispatcher.add(b, 2, 50, "resize", false);
+    dispatcher.add(a, 1, 51, "visible", false);
+
+    assertEquals(log, ["resize:observe:1", "resize:observe:2", "visible:observe:1"]);
+    assertEquals(instances.length, 2, "one ResizeObserver + one IntersectionObserver, shared");
+
+    dispatcher.remove(a, 1, 50, "resize", false);
+    assertEquals(log.at(-1), "resize:unobserve:1");
+  } finally {
+    restore();
+  }
+});
+
+// The highest-risk path: ElementIds are reused slab indices and the guest
+// never emits remove-event-listener for unmounted subtrees, so a missed
+// unobserve leaves a live observation on a detached node.
+Deno.test("resize/visible: purge unobserves every observed name for the id", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+  const { log, restore } = stubObservers();
+  try {
+    const el = document.createElement("div");
+    root.appendChild(el);
+    dispatcher.add(el, 4, 50, "resize", false);
+    dispatcher.add(el, 4, 51, "visible", false);
+    log.length = 0;
+
+    dispatcher.purge(4, el);
+    assertEquals(log.sort(), ["resize:unobserve:4", "visible:unobserve:4"]);
+    assertEquals(el.hasAttribute("data-dioxus-id"), false);
+
+    // And the registration is gone, so even a late observation for a
+    // reused id resolves to nothing.
+    dispatcher.dispatchTo(el, "resize", { type: "resize" });
+    assertEquals(calls, []);
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("resize/visible: dispose disconnects both observers", () => {
+  const { document, root } = makeRoot();
+  const { sink } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+  const { log, instances, restore } = stubObservers();
+  try {
+    const el = document.createElement("div");
+    root.appendChild(el);
+    dispatcher.add(el, 1, 50, "resize", false);
+    dispatcher.add(el, 1, 51, "visible", false);
+    log.length = 0;
+
+    dispatcher.dispose();
+    assertEquals(log.sort(), ["resize:disconnect", "visible:disconnect"]);
+    assertEquals(instances.every((i) => i.disconnected), true, "no observation survives dispose");
+  } finally {
+    restore();
+  }
+});
+
+// The observer callback resolves through #registrations, so an observation
+// is only ever delivered to a live registration.
+Deno.test("resize: observer callback dispatches through the sink with the entry payload", () => {
+  const { document, root } = makeRoot();
+  const { sink, calls } = recordingSink();
+  const dispatcher = new EventDispatcher(root, sink);
+
+  // deno-lint-ignore no-explicit-any
+  const g = globalThis as any;
+  let fire: ((entries: unknown[]) => void) | undefined;
+  g.ResizeObserver = class {
+    constructor(cb: (entries: unknown[]) => void) {
+      fire = cb;
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  try {
+    const el = document.createElement("div");
+    root.appendChild(el);
+    dispatcher.add(el, 6, 50, "resize", false);
+
+    const entry = {
+      target: el,
+      borderBoxSize: boxSize(100, 50),
+      contentBoxSize: boxSize(90, 40),
+      contentRect: { x: 0, y: 0, width: 90, height: 40 },
+    };
+    fire!([entry]);
+
+    assertEquals(calls.length, 1);
+    assertEquals(calls[0].elementId, 6);
+    assertEquals(calls[0].nameId, 50);
+    assertEquals(calls[0].name, "resize");
+    assertEquals(serializePayload("resize", calls[0].ev as never), {
+      kind: "resize",
+      value: { borderBox: { width: 100, height: 50 }, contentBox: { width: 90, height: 40 } },
+    });
+
+    // After purge the same observation resolves to nothing (no dispatch
+    // into a dead/reused ElementId).
+    dispatcher.purge(6, el);
+    fire!([entry]);
+    assertEquals(calls.length, 1);
+  } finally {
+    delete g.ResizeObserver;
+  }
 });

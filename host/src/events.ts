@@ -75,6 +75,34 @@ export interface NativeEventLike {
   touches?: ArrayLike<TouchPointLike>;
   changedTouches?: ArrayLike<TouchPointLike>;
   targetTouches?: ArrayLike<TouchPointLike>;
+  // resize (ResizeObserverEntry fields, carried verbatim onto the
+  // event-like the observer feeds the sink — same treatment as the touch
+  // lists above: the entry's own field names, duck-typed).
+  borderBoxSize?: ArrayLike<ResizeObserverSizeLike>;
+  contentBoxSize?: ArrayLike<ResizeObserverSizeLike>;
+  contentRect?: RectLike;
+  // visible (IntersectionObserverEntry fields)
+  boundingClientRect?: RectLike;
+  intersectionRatio?: number;
+  intersectionRect?: RectLike;
+  isIntersecting?: boolean;
+  rootBounds?: RectLike | null;
+  /** DOMHighResTimeStamp, relative to the page's time origin. */
+  time?: number;
+}
+
+/** Duck-typed `ResizeObserverSize` — WRITING-MODE RELATIVE dimensions. */
+interface ResizeObserverSizeLike {
+  blockSize?: number;
+  inlineSize?: number;
+}
+
+/** Duck-typed `DOMRectReadOnly` (the wit `rect` fields we consume). */
+interface RectLike {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
 }
 
 /** Duck-typed `Touch` (per-point fields of a TouchList entry). */
@@ -432,6 +460,87 @@ function touchData(ev: NativeEventLike) {
   };
 }
 
+/** wit events.size { width, height } from a writing-mode-relative
+ * `ResizeObserverSize`. `inlineSize`/`blockSize` are along the writing
+ * direction, so they map to width/height only in a horizontal writing mode
+ * and SWAP otherwise (ref:serialize.ts:113-119). */
+function sizeFromBox(box: ResizeObserverSizeLike | undefined, inlineIsWidth: boolean) {
+  const inline = num(box?.inlineSize);
+  const block = num(box?.blockSize);
+  return inlineIsWidth
+    ? { width: inline, height: block }
+    : { width: block, height: inline };
+}
+
+function sizeFromRect(r: RectLike | undefined) {
+  return { width: num(r?.width), height: num(r?.height) };
+}
+
+/** wit events.rect { x, y, width, height } from a DOMRect-like. */
+function rectData(r: RectLike | undefined) {
+  return { x: num(r?.x), y: num(r?.y), width: num(r?.width), height: num(r?.height) };
+}
+
+function resizeData(ev: NativeEventLike) {
+  // ref:serialize.ts:122-133: the writing mode of the OBSERVED element
+  // decides whether inlineSize is the width. Default `true`
+  // (`horizontal-tb`) when we cannot ask — upstream defaults the same way
+  // for a non-HTMLElement target. `getComputedStyle` is guarded because
+  // linkedom (host unit tests) does not provide it.
+  let inlineIsWidth = true;
+  const gcs = (globalThis as { getComputedStyle?: (e: Element) => { writingMode?: string } })
+    .getComputedStyle;
+  const target = ev.target as Element | null | undefined;
+  if (typeof gcs === "function" && target) {
+    const wm = gcs(target)?.writingMode;
+    if (typeof wm === "string" && wm !== "" && wm !== "horizontal-tb") inlineIsWidth = false;
+  }
+  // ref:serialize.ts:135-147: fall back to `contentRect` when either
+  // box-size array is absent (the arrays are the newer API).
+  const border = ev.borderBoxSize?.[0];
+  const content = ev.contentBoxSize?.[0];
+  return {
+    borderBox: ev.borderBoxSize ? sizeFromBox(border, inlineIsWidth) : sizeFromRect(ev.contentRect),
+    contentBox: ev.contentBoxSize
+      ? sizeFromBox(content, inlineIsWidth)
+      : sizeFromRect(ev.contentRect),
+  };
+}
+
+function visibleData(ev: NativeEventLike) {
+  // DELIBERATE DEVIATION FROM ref:serialize.ts:163, which sends
+  // `Math.floor(Date.now() + detail.time)`. The guest reads this field as
+  // `UNIX_EPOCH + Duration::from_millis(time_ms)` (dioxus-html-0.7.10
+  // src/events/visible.rs:203), i.e. ms since the Unix epoch;
+  // `entry.time` is a DOMHighResTimeStamp measured from the page's TIME
+  // ORIGIN, so the epoch-relative value is `performance.timeOrigin +
+  // entry.time`. Upstream's `Date.now() +` overshoots by the page's
+  // uptime. Do not "correct" this back to Date.now().
+  const origin =
+    typeof performance !== "undefined" && typeof performance.timeOrigin === "number"
+      ? performance.timeOrigin
+      : 0;
+  // Floored because wit `time-ms` is u64 (ref:serialize.ts:162), and lowered
+  // as a BigInt: the component-model binding for a 64-bit integer rejects a
+  // JS number outright ("u64 expects a bigint") rather than coercing. This is
+  // the only 64-bit field crossing this boundary, so it is the only place the
+  // distinction bites — and it bites at dispatch time, inside `handle-event`,
+  // where it surfaces as an onError rather than a serializer failure. The
+  // unit test below pins the BigInt-ness for that reason: comparing plain
+  // numbers here would pass while the real boundary throws.
+  const timeMs = BigInt(Math.max(0, Math.floor(origin + num(ev.time))));
+  return {
+    boundingClientRect: rectData(ev.boundingClientRect),
+    intersectionRatio: num(ev.intersectionRatio),
+    intersectionRect: rectData(ev.intersectionRect),
+    isIntersecting: bool(ev.isIntersecting),
+    // `option<rect>` -> `rect | undefined`; `rootBounds` is null for an
+    // implicit cross-origin viewport root.
+    rootBounds: ev.rootBounds ? rectData(ev.rootBounds) : undefined,
+    timeMs,
+  };
+}
+
 /** Serialize a native event into the wit `events.payload` value shape
  * (contracts/embedder-api.md "Value mapping": variant -> `{ kind, value }`).
  * Family chosen by event name, mirroring dioxus-html's name->data-type
@@ -449,6 +558,9 @@ export function serializePayload(name: string, ev: NativeEventLike): unknown {
   if (ANIMATION_EVENTS.has(name)) return { kind: "animation", value: animationData(ev) };
   if (TRANSITION_EVENTS.has(name)) return { kind: "transition", value: transitionData(ev) };
   if (TOUCH_EVENTS.has(name)) return { kind: "touch", value: touchData(ev) };
+  // Synthesized by the dispatcher's observers, not by the DOM.
+  if (name === "resize") return { kind: "resize", value: resizeData(ev) };
+  if (name === "visible") return { kind: "visible", value: visibleData(ev) };
   return { kind: "empty" };
 }
 
@@ -457,6 +569,16 @@ export function serializePayload(name: string, ev: NativeEventLike): unknown {
 /** Attribute dioxus-web uses to mark elements resolvable from a dispatched
  * native event back to their guest ElementId (ref:core.ts:48,124). */
 const DIOXUS_ID_ATTR = "data-dioxus-id";
+
+/** `resize`/`visible` are not DOM events: dioxus-web synthesizes them from
+ * a ResizeObserver / IntersectionObserver (ref:core.ts:109-113). Both are
+ * non-bubbling (dioxus-core-types-0.7.10/src/bubbles.rs:87,102), so they
+ * already arrive on the per-element registration path, which maps 1:1 onto
+ * observe-per-element. */
+type ObserverName = "resize" | "visible";
+function isObserverName(name: string): name is ObserverName {
+  return name === "resize" || name === "visible";
+}
 
 interface Registration {
   bubbles: boolean;
@@ -503,6 +625,17 @@ export class EventDispatcher implements ListenerDelegate {
   // elementId -> event name -> bubbles, for target-resolution's
   // "has a registration for that event name" check.
   #registrations = new Map<number, Map<string, Registration>>();
+  // elementId -> { the element, the observer-backed names it is observed
+  // for }. Parallel to `#local` (which holds native listeners) and read by
+  // `remove`/`purge`/`dispose` to unobserve. Kept separate because these
+  // names have no native listener to remove and their teardown goes
+  // through the observer, not the node.
+  #observed = new Map<number, { el: Element; names: Set<ObserverName> }>();
+  // Lazily created, dispatcher-owned, shared across every observed element
+  // (ref:core.ts:62-71,90-99). Upstream passes NO options to either
+  // constructor; neither do we.
+  #resizeObserver: ResizeObserver | undefined;
+  #intersectionObserver: IntersectionObserver | undefined;
 
   constructor(root: Element, sink: DispatchSink) {
     this.#root = root;
@@ -552,6 +685,16 @@ export class EventDispatcher implements ListenerDelegate {
     }
     byName.set(name, { bubbles, nameId });
 
+    if (isObserverName(name)) {
+      // No native `resize`/`visible` event exists, so — exactly as the
+      // `mounted` comment above describes — attaching a native listener
+      // would produce one that can never fire. Observe instead. Unlike
+      // `mounted` these DO fire repeatedly, so the `#registrations` entry
+      // set above is a real one and the removal paths must tear it down.
+      this.#observe(el, elementId, name);
+      return;
+    }
+
     if (bubbles) {
       let entry = this.#global.get(name);
       if (!entry) {
@@ -578,6 +721,115 @@ export class EventDispatcher implements ListenerDelegate {
     }
   }
 
+  /** Start observing `el` for an observer-backed name, lazily creating the
+   * dispatcher's shared observer (ref:core.ts:62-71,90-99).
+   *
+   * DEGRADED PATH (deliberate): linkedom — the DOM used by every host unit
+   * test — provides neither constructor. When the observer is unavailable
+   * we still record the registration (done by the caller) but observe
+   * nothing, so `add()` is a no-op rather than a throw. Nothing can then
+   * fire, which is the correct behaviour in a DOM that has no layout. */
+  #observe(el: Element, elementId: number, name: ObserverName): void {
+    let entry = this.#observed.get(elementId);
+    if (!entry) {
+      entry = { el, names: new Set() };
+      this.#observed.set(elementId, entry);
+    } else {
+      // Same defensive refresh as `#local`: an id reassigned without an
+      // intervening purge must not keep observing the stale element.
+      if (entry.el !== el) {
+        for (const stale of entry.names) this.#unobserveNode(entry.el, stale);
+        entry.el = el;
+      }
+    }
+    const observer = name === "resize" ? this.#resize() : this.#intersection();
+    if (!observer) return; // degraded path; see doc comment
+    entry.names.add(name);
+    observer.observe(el);
+  }
+
+  #resize(): ResizeObserver | undefined {
+    if (this.#resizeObserver) return this.#resizeObserver;
+    const Ctor = (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver;
+    if (typeof Ctor !== "function") return undefined;
+    this.#resizeObserver = new Ctor((entries) => {
+      for (const entry of entries) {
+        // Build the payload-bearing event-like straight from the observer
+        // entry and hand it to the sink. Deliberately NOT upstream's
+        // CustomEvent round-trip (ref:core.ts:51-60): that exists only
+        // because upstream's handler is keyed on native events; this
+        // dispatcher has a direct sink (see synthetic `mounted`).
+        this.#dispatchObserved("resize", entry.target, {
+          type: "resize",
+          target: entry.target,
+          borderBoxSize: entry.borderBoxSize,
+          contentBoxSize: entry.contentBoxSize,
+          contentRect: entry.contentRect,
+        });
+      }
+    });
+    return this.#resizeObserver;
+  }
+
+  #intersection(): IntersectionObserver | undefined {
+    if (this.#intersectionObserver) return this.#intersectionObserver;
+    const Ctor = (globalThis as { IntersectionObserver?: typeof IntersectionObserver })
+      .IntersectionObserver;
+    if (typeof Ctor !== "function") return undefined;
+    this.#intersectionObserver = new Ctor((entries) => {
+      for (const entry of entries) {
+        this.#dispatchObserved("visible", entry.target, {
+          type: "visible",
+          target: entry.target,
+          boundingClientRect: entry.boundingClientRect,
+          intersectionRatio: entry.intersectionRatio,
+          intersectionRect: entry.intersectionRect,
+          isIntersecting: entry.isIntersecting,
+          rootBounds: entry.rootBounds,
+          time: entry.time,
+        });
+      }
+    });
+    return this.#intersectionObserver;
+  }
+
+  /** Resolve an observation back to its live registration and dispatch.
+   * Resolution goes through `#registrations` (never a cached id), so an
+   * observation that somehow outlived its registration is dropped rather
+   * than delivered to a reused ElementId. */
+  #dispatchObserved(name: ObserverName, target: Element, ev: NativeEventLike): void {
+    const idAttr = target.getAttribute(DIOXUS_ID_ATTR);
+    if (idAttr === null) return;
+    const elementId = Number(idAttr);
+    const reg = this.#registrations.get(elementId)?.get(name);
+    if (!reg) return;
+    this.#sink(elementId, reg.nameId, name, ev);
+  }
+
+  #unobserveNode(el: Element, name: ObserverName): void {
+    const observer = name === "resize" ? this.#resizeObserver : this.#intersectionObserver;
+    observer?.unobserve(el);
+  }
+
+  /** Stop observing one (element, observer-name) pair and forget it. */
+  #unobserve(el: Element, elementId: number, name: ObserverName): void {
+    const entry = this.#observed.get(elementId);
+    if (!entry || !entry.names.has(name)) return;
+    this.#unobserveNode(el, name);
+    entry.names.delete(name);
+    if (entry.names.size === 0) this.#observed.delete(elementId);
+  }
+
+  /** Stop every observation recorded for `elementId`. Shared by `purge`
+   * and `dispose`; unobserves the element THIS dispatcher observed (the
+   * cached node), not whatever node the caller happens to hold. */
+  #unobserveAll(elementId: number): void {
+    const entry = this.#observed.get(elementId);
+    if (!entry) return;
+    for (const name of entry.names) this.#unobserveNode(entry.el, name);
+    this.#observed.delete(elementId);
+  }
+
   /** Release one bubbling registration's share of the refcounted root
    * listener for `name`, removing the root listener at zero. Shared by
    * `remove` (guest-driven) and `purge` (unmount/id-reuse driven). */
@@ -599,7 +851,9 @@ export class EventDispatcher implements ListenerDelegate {
       this.#registrations.delete(elementId);
     }
 
-    if (bubbles) {
+    if (isObserverName(name)) {
+      this.#unobserve(el, elementId, name);
+    } else if (bubbles) {
       this.#releaseGlobal(name);
     } else {
       const entry = this.#local.get(elementId);
@@ -642,6 +896,11 @@ export class EventDispatcher implements ListenerDelegate {
       this.#local.delete(elementId);
     }
 
+    // Observations are NOT listeners: nothing detaches them when the node
+    // leaves the tree, so a missed unobserve here keeps a live observation
+    // on a detached node firing into a reused ElementId.
+    this.#unobserveAll(elementId);
+
     this.#registrations.delete(elementId);
     // The old node may be a Text/Comment (the node table holds any Node),
     // which has no removeAttribute — optional-call rather than a tag check.
@@ -663,6 +922,14 @@ export class EventDispatcher implements ListenerDelegate {
       }
     }
     this.#local.clear();
+    // `disconnect()` stops every observation this dispatcher ever started,
+    // in one call — no per-element bookkeeping to get wrong. The observers
+    // are dropped too, so a disposed dispatcher cannot resurrect one.
+    this.#resizeObserver?.disconnect();
+    this.#resizeObserver = undefined;
+    this.#intersectionObserver?.disconnect();
+    this.#intersectionObserver = undefined;
+    this.#observed.clear();
     this.#registrations.clear();
   }
 
