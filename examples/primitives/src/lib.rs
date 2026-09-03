@@ -21,6 +21,16 @@
 //! still work for everything driven from Rust; they lose only the parts
 //! implemented in JavaScript. They are included here with the loss named.
 //!
+//! **This is permanent, not a gap awaiting work.** Implementing `eval` is
+//! technically possible — the host is JavaScript, and dioxus-desktop does
+//! exactly this over IPC — but a primary consumer of this renderer
+//! (polyvisor) cannot permit arbitrary JS evaluation at all, so the
+//! capability will not be added. Anything below marked degraded is degraded
+//! for good on this renderer. The remedy for a behaviour you actually need
+//! is to reimplement it with Dioxus event handlers plus CSS, as
+//! `examples/components/src/jsfree.rs` does for a dialog and a tooltip —
+//! not to wait for eval.
+//!
 //! ## Included and fully functional
 //!
 //! switch, slider, progress, tabs, radio_group, toggle, toggle_group,

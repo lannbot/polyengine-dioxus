@@ -6,6 +6,13 @@
 //! behaviours, the two below re-derive them from plain Dioxus event
 //! handlers plus CSS.
 //!
+//! This pattern is the standing answer for this renderer, not a stopgap: a
+//! primary consumer (polyvisor) cannot permit arbitrary JS evaluation, so
+//! neither a JS boundary nor `document::eval` will be added. A JS-driven
+//! behaviour you need has to be re-derived, as here — see
+//! `examples/primitives/src/lib.rs` for which upstream primitives that
+//! leaves degraded.
+//!
 //! What upstream does with JS, and what happens to it here:
 //!
 //! **Tooltip** (`src/components/tooltip/tooltip.rs`)
