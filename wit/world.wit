@@ -18,8 +18,9 @@ package polymorph:dioxus@0.2.0;
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
 /// construction (the family is chosen host-side by event name, mirroring
-/// dioxus-html's name→data-type mapping). Families not yet covered
-/// (drag/touch/composition/animation/media specifics) dispatch as `empty`
+/// dioxus-html's name→data-type mapping). Drag events reuse the `mouse`
+/// family (DOM drag events are MouseEvents). Families not yet covered
+/// (touch/composition/animation/media specifics) dispatch as `empty`
 /// in this version. `onmounted` also carries an `empty` payload, but is
 /// not "uncovered": its handler's value is the `MountedData` handle the
 /// guest builds from the dispatch's `target`, backed by the `dom`

@@ -105,6 +105,27 @@ function isPointerEvent(name: string): boolean {
   return name.startsWith("pointer") || EXTRA_POINTER_EVENTS.has(name);
 }
 
+// dioxus-html-0.7.10 generated.rs Drag(DragData) events= list (the
+// `#[convert = convert_drag_data]` block at generated.rs:39-50, immediately
+// above `Focus(FocusData)`). DragData implements HasMouseData (dioxus-html src/events/
+// drag.rs), and DOM drag events ARE MouseEvents (clientX/clientY/button/
+// buttons/modifiers), so these route to the existing `mouse` family rather
+// than a dedicated `drag` payload — src/events.rs's `Drag(wit::MouseData)`
+// adapter is the guest-side half of this. None of these names collide with
+// `isPointerEvent`'s `pointer`-prefix test or with MOUSE_EVENTS/
+// EXTRA_POINTER_EVENTS above (in particular, `drop` does not start with
+// "drag" and isn't a pointer/mouse event name already claimed elsewhere).
+const DRAG_EVENTS = new Set([
+  "drag",
+  "dragend",
+  "dragenter",
+  "dragexit",
+  "dragleave",
+  "dragover",
+  "dragstart",
+  "drop",
+]);
+
 function num(v: number | undefined, fallback = 0): number {
   return typeof v === "number" ? v : fallback;
 }
@@ -280,6 +301,7 @@ function scrollData(ev: NativeEventLike) {
 export function serializePayload(name: string, ev: NativeEventLike): unknown {
   if (isPointerEvent(name)) return { kind: "pointer", value: pointerData(ev) };
   if (MOUSE_EVENTS.has(name)) return { kind: "mouse", value: mouseData(ev) };
+  if (DRAG_EVENTS.has(name)) return { kind: "mouse", value: mouseData(ev) };
   if (KEYBOARD_EVENTS.has(name)) return { kind: "keyboard", value: keyboardData(ev) };
   if (name === "wheel") return { kind: "wheel", value: wheelData(ev) };
   if (FORM_EVENTS.has(name)) return { kind: "form", value: formData(name, ev) };

@@ -68,12 +68,19 @@
 //!   `indeterminate` DOM *properties*, which cannot be set by attribute — so
 //!   the control is correct but the hidden input it would submit in a form is
 //!   not. This gallery has no form.
-//! - **drag_and_drop_list** — the list, its keyboard-reorder affordances and
-//!   the live region all render, and keyboard reordering is the working path.
-//!   Mouse dragging is not: `ondragstart` installs the document-level
-//!   `dragover`/`drop` listeners that decide the drop target through an eval
-//!   (drag_and_drop_list.rs:673), so a drag starts and then has nowhere to
-//!   land.
+//! - **drag_and_drop_list** — both paths work: keyboard reordering, and mouse
+//!   dragging that ends over the list. The `<ul>` carries its own
+//!   `ondragover`/`ondrop`, and that `ondrop` calls `ctx.drop()` directly
+//!   (drag_and_drop_list.rs:448-458), while each item's `ondragover` computes
+//!   the target from its own client rect. Lost: the eval at
+//!   drag_and_drop_list.rs:673 installs capture-phase *document* `dragover`
+//!   (preventDefault, so anywhere on the page accepts a drop) and `drop`
+//!   (which also calls `ctx.drop()`). Without it, releasing outside the list
+//!   fires no drop event, so the pending reorder is discarded — the item's
+//!   `ondragend` (line 716) still runs `end_drag`, so state is left clean, it
+//!   just does not commit. The eval's third listener, `dragend`, is redundant
+//!   with that handler. Assert that a drop landing on the list reorders it and
+//!   that one released off the list does not.
 //!
 //! avatar deserves a note: it *does* work here. Its eval (avatar.rs:298) is
 //! only a reconciliation path for cached or instant image loads that complete
@@ -236,12 +243,28 @@ fn DndItems() -> Element {
             class: "dx-dnd-list-ul",
             aria_label: "Sortable list".to_string(),
             for item in drag_and_drop_list::use_drag_and_drop_list_items() {
-                drag_and_drop_list::DragAndDropListItem {
+                // Mirrors upstream's default composition
+                // (drag_and_drop_list.rs:420-440): the indicators must be
+                // real siblings of the item, because primitives.css keys all
+                // drop feedback off `+` / `:has(+ ...)` combinators.
+                Fragment {
                     key: "{item.key}",
-                    class: "dx-dnd-list-item",
-                    index: item.index,
-                    item_key: item.key.clone(),
-                    {item.children}
+                    drag_and_drop_list::DragAndDropDropIndicator {
+                        class: "dx-drop-indicator",
+                        index: item.index,
+                        position: "before",
+                    }
+                    drag_and_drop_list::DragAndDropListItem {
+                        class: "dx-dnd-list-item",
+                        index: item.index,
+                        item_key: item.key.clone(),
+                        {item.children}
+                    }
+                    drag_and_drop_list::DragAndDropDropIndicator {
+                        class: "dx-drop-indicator",
+                        index: item.index,
+                        position: "after",
+                    }
                 }
             }
         }

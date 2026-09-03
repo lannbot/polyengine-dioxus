@@ -506,13 +506,14 @@ impl HasFileData for Empty {
     }
 }
 
-/// Drag events are NOT currently mapped to the `mouse` family by the host —
-/// host/src/events.ts dispatches all `drag*` names to `{ kind: "empty" }`,
-/// and the WIT payload variant list has no `drag` arm at all in this
-/// version. This struct exists for forward-compat: if/when the host gains
-/// drag support and starts sending a mouse-shaped snapshot for drag events,
-/// this reuses [`Mouse`] for the positional half and supplies empty
-/// file/data-transfer halves. Until then it is unreachable from real events.
+/// Drag events ARE mapped to the `mouse` family by the host —
+/// host/src/events.ts dispatches all `drag*`/`drop` names to `{ kind:
+/// "mouse", ... }`, since DOM drag events are MouseEvents and dioxus-html's
+/// `DragData` implements `HasMouseData` (dioxus-html src/events/drag.rs).
+/// The WIT payload variant list has no dedicated `drag` arm; this struct
+/// reuses [`Mouse`] for the positional half and supplies empty
+/// file/data-transfer halves, since the host does not send a data-transfer
+/// snapshot.
 struct Drag(wit::MouseData);
 
 impl InteractionLocation for Drag {
