@@ -196,7 +196,71 @@ test("primitives example: gallery mounts, switch/tabs/accordion interactions wor
   expect(await progressValue.textContent(), "the 300ms wait must not resolve synchronously").toBe(beforeDelay);
   await expect(progressValue).toHaveText(expectedAfter, { timeout: 5_000 });
 
-  // 8) Zero collected page errors / console errors throughout.
+  // 8) Select: choose an option, then exercise typeahead.
+  //
+  // Selectors verified against the BUILT app's DOM (inspected in Chromium, not
+  // inferred from upstream source):
+  //   - root      div.dx-select with data-state="closed" | "open"
+  //   - trigger   <button aria-haspopup="listbox" aria-expanded="true|false">
+  //               — note there is NO role="combobox" here, so don't reach for it
+  //   - list      div[role="listbox"][data-state="open"], tabindex="0"
+  //   - options   div[role="option"] with aria-selected / data-disabled, and a
+  //               ROVING tabindex: the active option holds tabindex="0" while
+  //               every other option holds "-1"
+  const select = page.locator("#demo-p-select");
+  const selectRoot = select.locator(".dx-select");
+  const selectTrigger = select.locator('button[aria-haspopup="listbox"]');
+  const selectValue = page.locator("#select-value");
+
+  await expect(selectValue).toHaveText("none");
+  await expect(selectRoot).toHaveAttribute("data-state", "closed");
+
+  await selectTrigger.click();
+  await expect(selectRoot).toHaveAttribute("data-state", "open");
+  await expect(selectTrigger).toHaveAttribute("aria-expanded", "true");
+
+  const options = select.locator('[role="option"]');
+  expect(await options.count(), "select must offer its six fruits").toBe(6);
+
+  // 8a) Typeahead — the regression witness that matters. Pressing a letter
+  // with the list open runs upstream's search, which spawns a task that
+  // sleeps the typeahead timeout before clearing the search buffer
+  // (primitives/src/select/context.rs:69). That is the same
+  // `dioxus_sdk_time::sleep` the `#progress-delayed` button exercises, but
+  // reached through REAL component code rather than a purpose-built button,
+  // which makes it the better guard on the wasip3 timer patch: a regression
+  // there aborts the instance mid-keystroke and shows up as a page error
+  // below.
+  //
+  // The active option is identified by the roving tabindex flipping to "0"
+  // (upstream also moves DOM focus to it).
+  await page.keyboard.press("d");
+  await expect(
+    options.filter({ hasText: "Damson" }),
+    "typing 'd' must make Damson the active option",
+  ).toHaveAttribute("tabindex", "0");
+  await expect(options.filter({ hasText: "Apple" })).toHaveAttribute("tabindex", "-1");
+
+  // 8b) The buffer clear itself, not just the search. The typeahead timeout is
+  // 1s by default; waiting past it and pressing "b" must match "Banana". If
+  // the sleep never completed, the buffer would still hold "d" and the search
+  // would run for "db" — which does not match Banana. So this assertion fails
+  // if the timer silently stops firing, which a focus-only check would not
+  // catch.
+  await page.waitForTimeout(1_500);
+  await page.keyboard.press("b");
+  await expect(
+    options.filter({ hasText: "Banana" }),
+    "after the typeahead buffer clears, 'b' must match Banana rather than searching 'db'",
+  ).toHaveAttribute("tabindex", "0");
+
+  // 8c) Committing a selection updates the readout and closes the list.
+  await options.filter({ hasText: "Elderberry" }).click();
+  await expect(selectValue).toHaveText("Elderberry");
+  await expect(selectRoot).toHaveAttribute("data-state", "closed");
+  await expect(selectTrigger).toContainText("Elderberry");
+
+  // 9) Zero collected page errors / console errors throughout.
   const collectedErrors = await page.evaluate(() =>
     (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
   );

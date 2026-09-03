@@ -35,8 +35,8 @@
 //!
 //! switch, slider, progress, tabs, radio_group, toggle, toggle_group,
 //! toolbar, separator, label, aspect_ratio, scroll_area, calendar,
-//! date_picker, avatar. (calendar and date_picker are only possible because the
-//! guest now builds for `wasm32-wasip2`, which imports
+//! date_picker, avatar, select. (calendar and date_picker are only possible
+//! because the guest now builds for `wasm32-wasip2`, which imports
 //! `wasi:clocks/wall-clock`: `time`'s "now" works, falling back to UTC when
 //! no local offset is available — primitives/src/lib.rs:333-337.)
 //!
@@ -81,32 +81,41 @@
 //! that event, so the state machine reaches `data-state="loaded"` on its own
 //! and the fallback is correctly dropped. Verified in the browser.
 //!
-//! ## No longer the abort category: timers
+//! ## Timers: no longer an exclusion at all
 //!
-//! **select, toast, context_menu** pull `dioxus-sdk-time`, which waited by
-//! calling `setTimeout` through wasm-bindgen. On `wasm32-wasip2` that
-//! compiles to an off-target stub that panics ("function not implemented on
-//! non-wasm32 targets") when called, aborting the whole component instance —
-//! the app dies, it does not degrade. That was the one exclusion that was a
-//! crash rather than a matter of taste.
+//! `dioxus-sdk-time` used to wait by calling `setTimeout` through
+//! wasm-bindgen. On `wasm32-wasip2` that compiles to an off-target stub which
+//! panics ("function not implemented on non-wasm32 targets") when called,
+//! aborting the whole component instance — so anything that slept was a hard
+//! crash rather than a degradation, and stayed out on those grounds.
 //!
 //! The workspace now patches `dioxus-sdk-time` to a fork whose `wasip3`
 //! feature waits on `wasi:clocks/monotonic-clock` instead (root
-//! `Cargo.toml`), an interface this host provides. `#progress-delayed` in the
-//! Progress section is the witness: it sleeps 300ms through
-//! `dioxus_sdk_time::sleep` and then moves `#progress-value`, so the e2e run
-//! fails if the wait ever stops completing.
+//! `Cargo.toml`), an interface this host provides. Timers work, and **no
+//! component is excluded for timer reasons any more.**
 //!
-//! What that changes per component:
+//! Two witnesses guard the patch, and the e2e lane asserts both:
 //!
-//! - **select** — the timer was its only blocker (a typeahead-buffer clear,
-//!   select/context.rs:69). Adding it is now a matter of vendoring its
-//!   preview stylesheet and writing the composition, not a platform gap.
-//! - **toast, context_menu** — still out, but now for the ordinary reason:
-//!   `document::eval`, same as the degraded group above.
+//! - `#progress-delayed` in the Progress section — synthetic: sleeps 300ms
+//!   through `dioxus_sdk_time::sleep`, then moves `#progress-value`.
+//! - **select's typeahead** — the better of the two, because it runs the wait
+//!   inside real upstream component code rather than a purpose-built button.
+//!   Typing a letter with the list open spawns a task that sleeps the
+//!   typeahead timeout and then clears the search buffer
+//!   (select/context.rs:69). Verified in the browser: typing `d` focuses
+//!   "Damson", and a `b` typed after the 1s timeout focuses "Banana" — which
+//!   only happens if the sleep completed and cleared the buffer, since an
+//!   uncleared buffer would search for "db".
 //!
-//! ## Excluded: missing machinery, no crash involved
-
+//! ## Excluded: `document::eval`, and too degraded to be worth showing
+//!
+//! **toast, context_menu.** Both are dismissal- and positioning-driven
+//! through `document::eval`, which is not coming (see the note at the top of
+//! this matrix). Unlike the degraded group above they have no useful residue
+//! without it — a toast that never dismisses and a context menu that cannot
+//! be summoned are not demonstrations of anything — so they get no section.
+//!
+//! ## Excluded: missing machinery or not public API
 //!
 //! - **navbar** — `NavbarItem` requires a `to:` navigation target, i.e. a
 //!   `dioxus-router` `Route` plus a history backend. Neither exists here.
@@ -128,14 +137,15 @@
 //!
 //! Root `#primitives-showcase`, plus `#demo-switch`, `#demo-slider`,
 //! `#demo-tabs`, `#demo-accordion-p`, `#demo-progress`, the live readout
-//! `#switch-state` (exactly `on` or `off`), and `#progress-delayed` /
-//! `#progress-value` for the timer witness.
+//! `#switch-state` (exactly `on` or `off`), `#progress-delayed` /
+//! `#progress-value` for the synthetic timer witness, and `#demo-p-select` /
+//! `#select-value` for the select and its typeahead witness.
 
 use dioxus::prelude::*;
 use dioxus_primitives::{
     accordion, alert_dialog, aspect_ratio, avatar, calendar, checkbox, collapsible,
     drag_and_drop_list, dropdown_menu, hover_card, label, menubar, popover, progress, radio_group,
-    scroll_area, separator, slider, switch, tabs, toggle, toggle_group, toolbar, tooltip,
+    scroll_area, select, separator, slider, switch, tabs, toggle, toggle_group, toolbar, tooltip,
     ContentAlign, ContentSide,
 };
 use dioxus_primitives::{date_picker, dialog};
@@ -250,6 +260,7 @@ fn app() -> Element {
     let mut bold = use_signal(|| false);
     let mut italic = use_signal(|| false);
     let mut menu_selection = use_signal(|| "none".to_string());
+    let mut select_value = use_signal(|| "none".to_string());
     let mut checkbox_state = use_signal(|| checkbox::CheckboxState::Unchecked);
     let mut dialog_open = use_signal(|| false);
     let mut alert_open = use_signal(|| false);
@@ -663,6 +674,46 @@ fn app() -> Element {
                             }
                         }
                     }
+                }
+            }
+
+            section {
+                h2 { "Select" }
+                // Distinct first letters throughout, so a single keypress is
+                // an unambiguous typeahead match — that path is what calls
+                // `sleep()` at select/context.rs:69, i.e. the real-component
+                // exercise of the timer patch.
+                div { id: "demo-p-select",
+                    select::Select::<String> {
+                        class: "dx-select",
+                        width: "12rem",
+                        on_value_change: move |v: Option<String>| {
+                            select_value.set(v.unwrap_or_else(|| "none".to_string()))
+                        },
+                        select::SelectTrigger { class: "dx-select-trigger", aria_label: "Select a fruit",
+                            select::SelectValue { placeholder: "Select a fruit..." }
+                        }
+                        select::SelectList { class: "dx-select-list", aria_label: "Fruits",
+                            select::SelectGroup {
+                                select::SelectGroupLabel { class: "dx-select-group-label", "Fruits" }
+                                for (i , fruit) in ["Apple", "Banana", "Cherry", "Damson", "Elderberry", "Fig"]
+                                    .into_iter()
+                                    .enumerate()
+                                {
+                                    select::SelectOption::<String> {
+                                        key: "{fruit}",
+                                        class: "dx-select-option",
+                                        index: i,
+                                        value: fruit.to_string(),
+                                        text_value: fruit.to_string(),
+                                        "{fruit}"
+                                        select::SelectItemIndicator { "\u{2714}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    span { id: "select-value", "{select_value}" }
                 }
             }
 
