@@ -301,37 +301,84 @@ run:
 Given the noise floor above, trust the direction and the order of
 magnitude of that column, not its third digit.
 
-A separate pure-JS experiment bounds the floor: materialising the
-`{kind, value}` object graph the typed schema forces into existence,
-with no runtime and no ABI lift at all, and walking it with the same
-applier, costs ~190 ns/op against ~45 ns/op for decoding the byte frame.
-That ~4x on the host decode step is the part no runtime work can remove
-— a typed channel must allocate two or three JS objects per operation,
-where the byte decoder passes operands straight to the sink as
-arguments and allocates nothing.
+### How far the runtime could actually take it
 
-**Disclosure.** Three of the measurements above — the runtime-stage
-attribution, the layout-memoization sensitivity run, and the pure-JS
-floor — came from one-off local experiments that are not in this tree:
-a scratch component exercising both encodings against a counting sink,
-and a temporary patch to the gitignored `.deps/polyengine` checkout
-(reverted; that checkout is pristine). They are described precisely
-enough to redo — the memoization is a `WeakMap` cache keyed by type
-identity on `alignment`, `elemSize`, `maxCaseAlignment` and
-`despecialize` — but they are not re-derivable by running anything
-committed here. The two-column table below, and the instrumented op
-counts, are.
+An earlier revision of this section claimed the remaining gap was a
+~4x floor that "no runtime work can remove", on the grounds that a
+typed channel must allocate two or three JS objects per operation.
+**That was wrong, and it was wrong in the direction that flattered the
+conclusion.** It held polyengine's value-mapping contract fixed, which
+is exactly the thing worth changing.
+
+Measured properly: several lift strategies run against the same guest
+memory at the same rendezvous, interleaved in one timed loop (so no
+strategy is measured under different JIT state), each asserted
+element-by-element to produce the same values as the interpreter and
+the same sink calls as `host/src/typed.ts`.
+
+| strategy | ns/element | vs byte protocol |
+| --- | --- | --- |
+| interpreted `load()` + `toHost` — what runs today | ~4080 | ~300x |
+| compiled lift — closure tree per type, identical JS values | ~232 | ~17x |
+| compiled visitor — operands passed as arguments | ~127 | ~9x |
+| the byte decoder here, same sink | ~14 | 1.0x |
+
+The "compiled lift" is just the interpreter specialised: walk the type
+descriptor once, build a tree of closures, and every field offset,
+`camelCase` name and variant case index becomes a constant. No `eval`,
+no emitted modules, no CSP question, no contract change — and 17x. The
+"compiled visitor" adds a contract change, handing operands to a
+per-case callback instead of materialising a `{kind, value}` wrapper
+and a payload record per element; that is where the allegedly
+irreducible allocation cost goes.
+
+Extrapolating to this bench: the ~4.9 µs/op the typed channel costs
+today is ~4.08 µs of lift plus ~0.8 µs of everything else. A compiled
+visitor would leave ~0.9 µs/op, taking `create-10k` from **5.8x to
+roughly 1.9x**. And the residual would no longer be lift — it is
+guest-side lowering (`src/typed.rs` allocates a `String` per dynamic
+operand and a `Vec` per list) plus the rendezvous copy plus the absence
+of `readDirect` for typed streams. Nobody has measured the lowering
+side; the next person should, before assuming the lift was the whole
+story.
+
+What genuinely does not go away is the layout. The lowered
+`list<operation>` is 24 bytes/element fixed-stride with strings, paths
+and node lists all out of line, against a packed variable-length frame
+decoded with one `TextDecoder` pass over one contiguous string segment.
+The typed path chases pointers and calls `TextDecoder` per string. That
+is the canonical ABI's memory layout, not the runtime's implementation
+of it.
+
+Reported upstream as
+[polyengine#261](https://github.com/polymorph-components/polyengine/issues/261).
+
+**Disclosure.** Four of the measurements above — the runtime-stage
+attribution, the layout-memoization sensitivity run, the compiled
+lift/visitor table, and the pure-JS floor — came from one-off local
+experiments that are not in this tree: a scratch component exercising
+both encodings against a counting sink, and temporary patches to the
+gitignored `.deps/polyengine` checkout (reverted; that checkout is
+pristine). The upstream issue carries the detail. They are not
+re-derivable by running anything committed here; the two-column table
+below, and the instrumented op counts, are.
 
 ### Read
 
 The delta is not small today: ~5x on op-heavy operations (12x on
 `clear`, which is nearly pure per-op cost with no DOM work to dilute
-it). It is the polyengine runtime's uncached lift, not the component
-model or the schema, that makes it that large. Most of it is
-recoverable — the layout memoization alone takes create-10k from 5.07x
-to 1.74x, and a per-type compiled lift would go further. But the floor
-is not 1.0x, and `create-10k` at 90 000 operations per render is
-exactly where a per-op cost is least forgivable.
+it). But essentially all of it is the polyengine runtime's interpreted
+lift, not the component model and not the schema — a compiled lift
+plus a visitor-shaped read would put `create-10k` at ~1.9x, and the
+bottleneck would then be guest-side lowering rather than anything the
+host does.
+
+So the decision is really about sequencing, not about the schema. On
+today's runtime the typed channel costs too much to adopt for a
+consumer that emits 90 000 operations per render. That is a statement
+about a fixable implementation, and the fix is upstream work that
+would benefit every polyengine consumer rather than anything this repo
+can do.
 
 The maintainability argument is also weaker than it looks: the arena
 workaround for WIT's recursion ban moves the template grammar's
