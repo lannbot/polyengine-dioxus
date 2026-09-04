@@ -191,3 +191,30 @@ Deno.test("hydrate: throws when a marker index is never matched", () => {
     Error,
   );
 });
+
+Deno.test("hydrate: an unclosed text marker throws the closing-marker diagnostic and binds nothing", () => {
+  // Three shapes `pre_render` never emits: the marker as the last child of
+  // its parent, the marker followed by text with no `<!--#-->`, and text
+  // followed by a comment that is not the closer. Each must surface as the
+  // "not closed" error — not a TypeError from a null nextSibling — and must
+  // leave the node table untouched, because a later error must not find a
+  // half-bound table on its way out.
+  for (
+    const html of [
+      '<div data-node-hydration="0"><!--node-id1--></div>',
+      '<div data-node-hydration="0"><!--node-id1-->text</div>',
+      '<div data-node-hydration="0"><!--node-id1-->text<!--other--></div>',
+    ]
+  ) {
+    const { root } = makeRoot(html);
+    const { delegate } = recordingDelegate();
+    const applier = new DomApplier(root, delegate);
+
+    const err = assertThrows(
+      () => applyOperations([{ kind: "hydrate", value: [1, 2] } as unknown as Operation], applier),
+      Error,
+    );
+    assertEquals(err.message.includes("not closed by <!--#-->"), true, `${html}: ${err.message}`);
+    assertEquals(applier.nodeFor(2), undefined, `${html}: text id must not be bound`);
+  }
+});
