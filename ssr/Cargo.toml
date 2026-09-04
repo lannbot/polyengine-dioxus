@@ -1,0 +1,35 @@
+[package]
+name = "polyengine-dioxus-ssr"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Server-side prerendering for Dioxus components, as a wasm32-wasip2 component"
+publish = false
+
+[dependencies]
+dioxus-core = "=0.7.10"
+# Depends only on askama_escape / dioxus-core / dioxus-core-types / rustc-hash:
+# no tokio, no net, no wasm-bindgen. Compiles to wasm32-wasip2 unpatched.
+dioxus-ssr = "=0.7.9"
+# Only for the `serve` artifact. Optional so the SSG artifact links no HTTP
+# bindings at all — and, more to the point, so this crate and
+# `polyengine-dioxus` (world `polymorph:dioxus/app`) can never contribute two
+# `component-type` custom sections to one binary.
+#
+# `async-spawn` is not optional here: `wasi:http/types.response.new` hands the
+# body's READ end to the host, which cannot read it until `handle` returns the
+# response. Writing the body before that would park forever, so the render has
+# to run in a task spawned to continue past `task.return`.
+wasip3 = { version = "0.8", optional = true, features = ["async-spawn"] }
+
+[features]
+serve = ["dep:wasip3"]
+
+[dev-dependencies]
+# Native-only: `rsx!` for the golden-HTML tests.
+dioxus = { version = "=0.7.10", default-features = false, features = [
+  "macro",
+  "html",
+  "signals",
+  "hooks",
+] }
