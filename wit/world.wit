@@ -423,8 +423,9 @@ interface mutations {
   ///
   /// The host finds marker `n` by walking the mount root: elements carry
   /// `data-node-hydration="n[,event:bubbles]..."`, dynamic text is bracketed
-  /// by `<!--node-id n-->text<!--#-->` and a placeholder is `<!--placeholder
-  /// n-->`. The marker comments are consumed (removed) by the walk, and an
+  /// by `<!--node-idN-->text<!--#-->` and a placeholder is `<!--placeholderN-->`
+  /// (no space before the number, and the host accepts no other spelling).
+  /// The marker comments are consumed (removed) by the walk, and an
   /// empty dynamic text gets a real text node inserted for the id to bind
   /// to. The listener suffix of the element marker is IGNORED here: listener
   /// registrations arrive as ordinary `new-event-listener` operations later

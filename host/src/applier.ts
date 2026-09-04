@@ -625,27 +625,34 @@ export class DomApplier implements OpSink {
         // ref:core.ts:281-291 — an empty dynamic text serializes as two
         // adjacent comments with no text node between them; create one for
         // the id to bind to. Otherwise the next sibling is the real text.
+        //
+        // The closing `<!--#-->` is located and checked BEFORE anything is
+        // bound or removed: `pre_render` always closes a dynamic text, so
+        // its absence (including a marker that is the last child of its
+        // parent) means the markup is not what this component rendered.
+        // Binding first would leave a wrong entry in the node table on the
+        // way to the error, and removing whatever happened to follow would
+        // corrupt the document.
+        const isClosing = (node: Node | null): node is Comment =>
+          node !== null && node.nodeType === COMMENT_NODE && node.textContent === "#";
         const next = comment.nextSibling;
         let textNode: Node;
-        if (next !== null && next.nodeType === COMMENT_NODE) {
+        let closing: Comment;
+        if (isClosing(next)) {
+          closing = next;
           textNode = this.#doc.createTextNode("");
-          comment.parentNode!.insertBefore(textNode, next);
+          comment.parentNode!.insertBefore(textNode, closing);
+        } else if (next !== null && next.nodeType !== COMMENT_NODE && isClosing(next.nextSibling)) {
+          textNode = next;
+          closing = next.nextSibling as Comment;
         } else {
-          textNode = next as Node;
-        }
-        this.#setNode(ids[n], textNode);
-        // Consume the closing `<!--#-->` too (ref:core.ts's
-        // `commentAfterText.remove()`); it carries no index of its own.
-        // Checked rather than assumed: `pre_render` always closes a dynamic
-        // text, so its absence means the markup is not what this component
-        // rendered, and removing whatever happened to follow would corrupt
-        // the document on the way to a later error.
-        const closing = textNode.nextSibling;
-        if (closing === null || closing.nodeType !== COMMENT_NODE || closing.textContent !== "#") {
           throw new Error(
             `DomApplier.hydrate: text marker "${text}" is not closed by <!--#-->`,
           );
         }
+        this.#setNode(ids[n], textNode);
+        // Consume both markers (ref:core.ts's `currentNode.remove()` /
+        // `commentAfterText.remove()`); the closing one carries no index.
         closing.parentNode?.removeChild(closing);
         comment.parentNode?.removeChild(comment);
       }

@@ -13,9 +13,10 @@
 //! Neither side matches HTML against the vdom. `pre_render` writes a marker
 //! wherever its own template walk reaches a node the client will need to
 //! address, numbering them with a single monotonic counter
-//! (`dynamic_node_id`, bumped at `Segment::AttributeNodeMarker`,
-//! `Segment::RootNodeMarker`, `DynamicNode::Text` and
-//! `DynamicNode::Placeholder` — dioxus-ssr-0.7.9 src/renderer.rs:189,215,267,281).
+//! (`dynamic_node_id`, bumped at `DynamicNode::Text`,
+//! `DynamicNode::Placeholder`, `Segment::AttributeNodeMarker` and
+//! `Segment::RootNodeMarker` — dioxus-ssr-0.7.9 src/renderer.rs:190,216,268,282,
+//! respectively).
 //! This module walks the *same* templates in the *same* order and pushes an
 //! id at exactly those four sites. So marker `n` and `ids[n]` are the `n`th
 //! stop of one walk described twice, and the host can bind them by counting
