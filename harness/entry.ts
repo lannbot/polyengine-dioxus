@@ -132,9 +132,8 @@ async function main(): Promise<void> {
   //     mountApp resolving is necessary but the initial mutation batch may
   //     still be async-in-flight — see host/tests/counter_test.ts's own
   //     waitFor(() => root.querySelector("#count") !== null, ...)).
-  //   - window.__mountedHandle: the raw `Mounted` object (frameDecoder,
-  //     dispatcher, dispose) for smoke assertions (STREAM transport
-  //     engagement via frameDecoder.pending()).
+  //   - window.__mountedHandle: the raw `Mounted` object (applier,
+  //     dispatcher, dispose) for smoke assertions.
   //   - window.__e2eErrors: collected page/onError errors (asserted empty).
   (globalThis as unknown as { __mountedHandle: typeof mounted }).__mountedHandle = mounted;
 

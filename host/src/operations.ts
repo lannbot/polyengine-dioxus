@@ -1,12 +1,12 @@
-// Typed-channel applier for the polymorph:dioxus explicit WIT mutation
-// schema (`interface mutations` / `stream<operation>`, wit/world.wit).
+// Applies the polymorph:dioxus mutation schema (`interface mutations` /
+// `stream<operation>`, wit/world.wit — the normative, and only, encoding of
+// a mutation) to a DOM applier.
 //
-// This is the typed counterpart of decoder.ts's `decodeBatch`: instead of
-// decoding a byte format, it walks already-lifted `operation` values (as
-// polyengine's embedder lifts them per .deps/polyengine/contracts/
-// embedder-api.md "Value mapping") and drives the same `OpSink`.
+// Walks already-lifted `operation` values (as polyengine's embedder lifts
+// them per .deps/polyengine/contracts/embedder-api.md "Value mapping") and
+// drives an `OpSink`.
 
-import type { OpSink, StrRef, TemplateNodeDesc } from "./decoder.ts";
+import type { OpSink, StrRef, TemplateNodeDesc } from "./applier.ts";
 
 // -- lifted-value shapes ----------------------------------------------------
 //
@@ -91,7 +91,7 @@ interface CacheStringLifted {
 }
 
 /** One lifted `operation` variant value. */
-export type OperationLifted =
+export type Operation =
   | { kind: "cache-string"; value: CacheStringLifted }
   | { kind: "register-template"; value: RegisterTemplateLifted }
   | { kind: "append-children"; value: StackOpLifted }
@@ -117,8 +117,9 @@ export type OperationLifted =
  * interface doc) into the recursive `TemplateNodeDesc` tree `OpSink.
  * registerTemplate` wants.
  *
- * The arena admits index graphs the byte grammar cannot express. Two are
- * rejected outright, with a thrown Error rather than a hang or a silently
+ * The arena admits malformed index graphs a natural recursive shape could
+ * not express. Two are rejected outright, with a thrown Error rather than a
+ * hang or a silently
  * wrong tree: an out-of-range index, and a cycle (a node that (transitively)
  * indexes itself as a child — `state[idx] === 1` below, "on the current
  * build path"). A THIRD shape is accepted rather than rejected: a DAG, where
@@ -139,10 +140,10 @@ function rehydrateTemplateArena(nodes: TemplateNodeLifted[], roots: number[]): T
 
   function build(idx: number): TemplateNodeDesc {
     if (idx < 0 || idx >= nodes.length) {
-      throw new Error(`applyTyped: register-template arena index ${idx} out of range (${nodes.length} nodes)`);
+      throw new Error(`applyOperations: register-template arena index ${idx} out of range (${nodes.length} nodes)`);
     }
     if (state[idx] === 1) {
-      throw new Error(`applyTyped: register-template arena has a cycle at index ${idx}`);
+      throw new Error(`applyOperations: register-template arena has a cycle at index ${idx}`);
     }
     if (state[idx] === 2) {
       return built[idx]!;
@@ -177,9 +178,8 @@ function rehydrateTemplateArena(nodes: TemplateNodeLifted[], roots: number[]): T
   return roots.map(build);
 }
 
-/** Apply a batch of lifted `operation` values to `sink` — the typed
- * counterpart of `decodeBatch`. */
-export function applyTyped(ops: OperationLifted[], sink: OpSink): void {
+/** Apply a batch of lifted `operation` values to `sink`. */
+export function applyOperations(ops: Operation[], sink: OpSink): void {
   for (const op of ops) {
     switch (op.kind) {
       case "cache-string":
@@ -256,7 +256,7 @@ export function applyTyped(ops: OperationLifted[], sink: OpSink): void {
         break;
       default: {
         const _exhaustive: never = op;
-        throw new Error(`applyTyped: unknown operation "${(_exhaustive as { kind: string }).kind}"`);
+        throw new Error(`applyOperations: unknown operation "${(_exhaustive as { kind: string }).kind}"`);
       }
     }
   }

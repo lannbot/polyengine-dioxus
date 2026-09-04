@@ -34,14 +34,6 @@ export const RUNS = 5;
 // (dispatch: "an unexplainable number is a bug lead, not a result").
 export const SANITY_FLOOR_MS = 0.5;
 
-// The two mutation channels (wit/world.wit `run` vs `run-typed`) A/B'd
-// against each other — see "Transport A/B" in bench/README.md. Both use the
-// SAME component build (one `.wasm`, two exports): `mountApp`'s `channel`
-// option picks which export/decode path is used, so there is only one
-// componentPath.
-export type TransportName = "bytes" | "typed";
-export const TRANSPORTS: TransportName[] = ["bytes", "typed"];
-
 export function componentPath(): string {
   return new URL(`./build/bench-rows.component.wasm`, import.meta.url).pathname;
 }
@@ -148,11 +140,12 @@ function posDataId(root: Element, pos: number): string | undefined {
  * after a small number of click/render round trips in one mount — this
  * bench was the first thing to drive repeated interactions through that
  * transport. Root-caused and fixed at the driver level, NOT here or in
- * polyengine (`src/driver.rs`'s `run()`; amendment A15 host retention —
- * see its module doc for the full explanation: the stream transport's
- * parked `readDirect` session is host-retained state that makes a
- * quiescent park legal, the call transport retains nothing host-side
- * once flush returns, so the same park was correctly indistinguishable
+ * polyengine (`src/driver.rs`'s `run()`; see its module doc for the full
+ * explanation, citing .deps/polyengine/contracts/embedder-api.md
+ * §"Streams and futures", issue #162 host retention: the stream
+ * transport's host-retained mutation-stream read end is what makes a
+ * quiescent park legal, the call transport retained nothing host-side
+ * once flush returned, so the same park was correctly indistinguishable
  * from deadlock and traps). This function stays written with minimal
  * microtask depth between dispatch and poll (tail-returning `waitFor`'s
  * promise rather than `await`ing it in an `async function`) since that
@@ -205,7 +198,6 @@ export function median(xs: number[]): number {
 }
 
 async function freshMount(
-  t: TransportName,
   componentBytes: Uint8Array,
   translator: Translator,
 ): Promise<{ root: Element; mounted: Mounted; errors: unknown[] }> {
@@ -214,12 +206,11 @@ async function freshMount(
   const mounted = await mountApp({
     source: { componentBytes, translator },
     root,
-    channel: t,
     onError: (err) => errors.push(err),
   });
-  await waitFor(() => root.querySelector("#row-count") !== null, `${t}: initial mount`);
+  await waitFor(() => root.querySelector("#row-count") !== null, "initial mount");
   if (errors.length > 0) {
-    throw new Error(`${t}: onError fired during mount: ${Deno.inspect(errors)}`);
+    throw new Error(`onError fired during mount: ${Deno.inspect(errors)}`);
   }
   return { root, mounted, errors };
 }
@@ -371,24 +362,23 @@ export const ops: OpDef[] = [
 
 /**
  * Run one op's warmup + N=5 timed reps against a *fresh* mount, and return
- * the median. Each op/transport pair is run in its own Deno process (see
- * bench_worker.ts / bench.ts) — cheap process isolation with no known
- * cost now, kept as a structural safety margin.
+ * the median. Each op is run in its own Deno process (see bench_worker.ts /
+ * bench.ts) — cheap process isolation with no known cost now, kept as a
+ * structural safety margin.
  *
  * Retries the whole attempt (fresh mount) up to `MAX_ATTEMPTS_PER_OP`
  * times as a defensive net, not because a specific failure mode is
  * expected: an earlier revision of this bench was the first thing to
- * drive repeated interactions through the CALL transport and hit a real
- * `run`-task deadlock trap doing so — root-caused and fixed at the
- * driver level (`src/driver.rs`'s `run()`, amendment A15 host retention;
- * see its module doc for the full explanation) rather than here. Kept as
- * a low-cost fallback in case of unrelated future flakiness, not because
- * this bug is expected to recur.
+ * drive repeated interactions through the CALL transport (since retired —
+ * bench/README.md's "Transport A/B (historical)") and hit a real
+ * `run`-task deadlock trap doing so — root-caused and fixed at the driver
+ * level (`src/driver.rs`'s `run()`; see its module doc for the full
+ * explanation) rather than here. Kept as a low-cost fallback in case of
+ * unrelated future flakiness, not because this bug is expected to recur.
  */
 const MAX_ATTEMPTS_PER_OP = 3;
 
 export async function runOp(
-  t: TransportName,
   componentBytes: Uint8Array,
   translator: Translator,
   op: OpDef,
@@ -396,7 +386,7 @@ export async function runOp(
   let lastErr: unknown;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS_PER_OP; attempt++) {
     try {
-      return await runOpOnce(t, componentBytes, translator, op);
+      return await runOpOnce(componentBytes, translator, op);
     } catch (e) {
       lastErr = e;
       // A "FATAL bench bug" is a real defect in this harness (bad
@@ -404,24 +394,23 @@ export async function runOp(
       // so surface it immediately rather than masking it behind retries.
       if (e instanceof Error && e.message.startsWith("FATAL bench bug")) throw e;
       console.error(
-        `bench/ops.ts: "${op.name}" (${t}) attempt ${attempt}/${MAX_ATTEMPTS_PER_OP} failed ` +
+        `bench/ops.ts: "${op.name}" attempt ${attempt}/${MAX_ATTEMPTS_PER_OP} failed ` +
           `(${e instanceof Error ? e.message : String(e)}); retrying with a fresh mount if attempts remain.`,
       );
     }
   }
   throw new Error(
-    `"${op.name}" (${t}) failed all ${MAX_ATTEMPTS_PER_OP} attempts. Last error: ` +
+    `"${op.name}" failed all ${MAX_ATTEMPTS_PER_OP} attempts. Last error: ` +
       `${lastErr instanceof Error ? lastErr.message : String(lastErr)}`,
   );
 }
 
 async function runOpOnce(
-  t: TransportName,
   componentBytes: Uint8Array,
   translator: Translator,
   op: OpDef,
 ): Promise<number> {
-  const { root, mounted } = await freshMount(t, componentBytes, translator);
+  const { root, mounted } = await freshMount(componentBytes, translator);
   // Warmup: exercises JIT/allocator warm paths and any one-time template
   // registration (dioxus registers a template on first encounter — see
   // src/writer.rs's module doc — so the very first create/update op pays a
@@ -442,7 +431,7 @@ async function runOpOnce(
   const m = median(timings);
   if (op.rowsInvolved >= 1000 && m < SANITY_FLOOR_MS) {
     throw new Error(
-      `FATAL bench bug: "${op.name}" (${t} transport) touches ${op.rowsInvolved} rows but median is ` +
+      `FATAL bench bug: "${op.name}" touches ${op.rowsInvolved} rows but median is ` +
         `${m.toFixed(3)}ms, under the ${SANITY_FLOOR_MS}ms sanity floor for that row count. This is not a ` +
         `credible number for real DOM work at that scale — investigate before reporting (per-rep timings: ` +
         `${timings.map((x) => x.toFixed(3)).join(", ")}ms).`,

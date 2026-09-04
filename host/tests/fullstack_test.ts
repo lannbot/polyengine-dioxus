@@ -2,7 +2,6 @@
 // real translator+runtime instantiation path, and exercises the round trip
 // described in fixtures/surface-probe/src/lib.rs's module doc (op sequence +
 // event summary format — the authority for the exact assertions below).
-//
 // Requires `just fixtures` to have built
 // fixtures/build/surface-probe.component.wasm first.
 
@@ -75,10 +74,6 @@ Deno.test("fullstack (stream transport): mount, event round trip, ordering", asy
   assertEquals(root.innerHTML, EXPECTED_INITIAL_HTML);
   assertEquals(errors, []);
 
-  // 5) The direct-read path decoded the whole delivered view into complete
-  // frames — nothing staged.
-  assertEquals(mounted.frameDecoder.pending(), 0);
-
   const section = root.firstElementChild!;
   assertEquals(section.tagName, "SECTION");
   const input = root.lastElementChild!;
@@ -101,7 +96,6 @@ Deno.test("fullstack (stream transport): mount, event round trip, ordering", asy
   assertEquals(root.innerHTML.includes("click:mouse:7,42"), true);
   assertEquals(prevented, 1, "prevent-default called (buttons === 7)");
   assertEquals(stopped, 1, "stop-propagation called (buttons === 7)");
-  assertEquals(mounted.frameDecoder.pending(), 0);
 
   // 4a) Dispatch input with a value: assert echo.
   const inputEvent = { type: "input", value: "hi there" };
@@ -159,7 +153,6 @@ Deno.test("fullstack (stream transport): mount, event round trip, ordering", asy
   mounted.dispatch(section, "touchstart", touchStartEvent);
   await waitFor(() => root.innerHTML.includes(EXPECTED_TOUCH_SUMMARY), "touchstart summary");
   assertEquals(root.innerHTML.includes(EXPECTED_TOUCH_SUMMARY), true);
-  assertEquals(mounted.frameDecoder.pending(), 0);
 
   assertEquals(errors, [], "no onError callback ever fired");
 

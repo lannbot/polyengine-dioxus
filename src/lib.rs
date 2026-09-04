@@ -1,22 +1,18 @@
 //! Dioxus renderer for components running on polyengine.
 //!
-//! - [`protocol`]: the batch encoder (op segment + string segment, interned
-//!   and dynamic strings) matching the wire format documented in
-//!   `wit/world.wit`.
-//! - [`writer`]: the `dioxus_core::WriteMutations` sink that fills a batch.
-//! - `bindings` / `driver` / `events` / `typed` (wasm32 only): the generated
-//!   WIT bindings, the `run`/`run-typed`/`handle-event` implementation, the
+//! - [`interner`]: the `&'static str` name table behind the protocol's
+//!   `cache-string` / `str-ref` interning.
+//! - `bindings` / `driver` / `events` / `writer` (wasm32 only): the generated
+//!   WIT bindings, the `run`/`handle-event` implementation, the
 //!   `HtmlEventConverter` over the WIT payload types, and the
-//!   `WriteMutations` sink for the typed channel's `stream<operation>`.
-//!   These are gated on `target_arch = "wasm32"` so `cargo test` can
-//!   exercise the encoder and writer natively. `typed` names the generated
-//!   bindings and so is not covered by `cargo test`; it is kept obviously
-//!   parallel to [`writer`] and checked host-side for equivalence.
+//!   `dioxus_core::WriteMutations` sink that fills a batch of
+//!   `mutations::operation` values. These are gated on
+//!   `target_arch = "wasm32"` because they name the generated bindings;
+//!   [`interner`] does not, so `cargo test` can exercise it natively.
 //!
 //! An application crate wires itself up with [`launch!`].
 
-pub mod protocol;
-pub mod writer;
+pub mod interner;
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings;
@@ -25,4 +21,4 @@ pub mod driver;
 #[cfg(target_arch = "wasm32")]
 pub mod events;
 #[cfg(target_arch = "wasm32")]
-pub mod typed;
+pub mod writer;

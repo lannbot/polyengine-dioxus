@@ -122,16 +122,7 @@ test("counter example: real click/type/submit through Chromium", async ({ page }
   const marker = await page.evaluate(() => (globalThis as unknown as { __preNavMarker?: string }).__preNavMarker);
   expect(marker, "a real navigation/reload would have wiped this in-page marker").toBe("still-here");
 
-  // 6) STREAM transport smoke assert: every delivered byte has been
-  // decoded into whole frames (host/src/host.ts's frameDecoder — "lets a
-  // test confirm the zero-copy direct-read path actually engaged").
-  const pending = await page.evaluate(() =>
-    (globalThis as unknown as { __mountedHandle: { frameDecoder: { pending(): number } } }).__mountedHandle
-      .frameDecoder.pending()
-  );
-  expect(pending, "frameDecoder must have no partial frame staged after settling").toBe(0);
-
-  // 7) Zero collected page errors / console errors throughout.
+  // 6) Zero collected page errors / console errors throughout.
   const collectedErrors = await page.evaluate(() =>
     (globalThis as unknown as { __e2eErrors: unknown[] }).__e2eErrors
   );

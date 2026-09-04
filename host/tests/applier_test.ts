@@ -1,7 +1,7 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { parseHTML } from "linkedom";
 import { DomApplier, type ListenerDelegate } from "../src/applier.ts";
-import type { TemplateNodeDesc } from "../src/decoder.ts";
+import type { TemplateNodeDesc } from "../src/applier.ts";
 
 function makeRoot() {
   const { document } = parseHTML("<!doctype html><html><body><div id=root></div></body></html>");

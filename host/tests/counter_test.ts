@@ -1,10 +1,9 @@
 // Full-stack host-runtime test for the REAL Dioxus counter example
-// (examples/counter/src/lib.rs, launch! uses the stream transport, the only
-// transport). This
+// (examples/counter/src/lib.rs, launch! uses the mutation stream). This
 // exercises the whole pipeline: driver.rs (run/handle-event tasks),
 // writer.rs (mutation batching), events.rs (payload conversion), and the
-// host-side applier/dispatcher/decoder — none of which had ever executed
-// end to end before this test existed.
+// host-side applier/dispatcher/operations applier — none of which had ever
+// executed end to end before this test existed.
 //
 // Requires `just example counter` to have built
 // examples/build/counter.component.wasm first.
@@ -176,9 +175,9 @@ Deno.test("counter example: mount, click, type, list, form submit", async () => 
 
   // 7) After dispose the runtime is detached: a further dispatch changes
   // nothing and surfaces no error. Dropping the mutation stream's read end
-  // RESOLVES the parked direct-read session (embedder-api.md A21's
-  // reader-drop rule) rather than rejecting it, so `onError` stays silent;
-  // the guest sees reader-gone on its next write and goes dark.
+  // resolves the read loop's next `read()` with `done` rather than
+  // rejecting it, so `onError` stays silent; the guest sees reader-gone on
+  // its next write and goes dark.
   const before = root.innerHTML;
   const postDispose = click(inc);
   mounted.dispatch(inc, "click", postDispose);

@@ -82,12 +82,6 @@ example name:
       examples/build/{{name}}.component.wasm \
       -o examples/build/{{name}}.plan.json
 
-# Regenerate golden vectors (runs the Rust generator, then verifies the TS
-# decoder agrees).
-vectors:
-    cargo test --test vectors -- --ignored generate
-    deno task test
-
 # Real-browser (Chromium via Playwright) E2E lane for the counter example.
 # First run: `cd e2e && npm install && npx playwright install chromium --with-deps`.
 # GitHub-Pages-ready static site for the TodoMVC example, assembled flat

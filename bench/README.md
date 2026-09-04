@@ -2,12 +2,10 @@
 
 Tracks absolute row-operation throughput on the pinned polyengine
 (`justfile`'s `POLYENGINE_REV`), Deno + linkedom (host-side DOM), a real
-Dioxus component (`examples/bench-rows`), over the stream transport (the
+Dioxus component (`examples/bench-rows`), over the mutation stream (the
 only transport — see "Transport A/B (historical)" below for why the call
-transport was retired). Since the typed-channel spike it runs **two
-columns**: the stream transport's two mutation *channels*, the byte
-protocol on `run` and the explicit WIT schema on `run-typed` (see
-"Channel A/B" below). The operations are
+transport was retired, and "Channel A/B (historical)" below for why an
+earlier hand-rolled byte protocol was retired too). The operations are
 js-framework-benchmark-style row operations (create/append/update/swap/
 remove/clear), so there's a baseline to track regressions against and to
 eventually compare with dioxus-web's published characteristics.
@@ -136,26 +134,37 @@ run for the same reason.
   `OpSink` methods in a throwaway script — enough for a one-off number,
   still not a standing column.)
 
-## Channel A/B: byte protocol vs explicit WIT schema
+## Channel A/B (historical): byte protocol vs explicit WIT schema
 
-The mutation channel's wire format is a hand-rolled byte encoding
-documented normatively in `wit/world.wit`'s `run` doc comment: opcodes,
-operand widths and framing all live in prose, and the encoder
-(`src/protocol.rs`) and decoder (`host/src/decoder.ts`) are two
-independent hand-written implementations of it that can only be kept in
-agreement by golden vectors and review. The obvious maintainability
-alternative is to spell the vocabulary as WIT — records plus one
-`operation` variant — and ship `stream<operation>` instead of
-`stream<u8>`, letting bindgen own both sides.
+**Retired.** `polymorph:dioxus` used to ship two mutation channels on the
+same stream transport: a hand-rolled byte encoding on `run` and an explicit
+WIT schema (`interface mutations` / `stream<operation>`) on `run-typed`.
+The A/B below is what closed that question: the owner decided to keep the
+typed channel and delete the byte one (recorded in `wit/world.wit` — `run`
+now returns `stream<operation>` directly, and there is only one export).
+This section preserves the measurement and reasoning that closed the
+question, for the record; the "byte" column below no longer exists in this
+tree.
 
-`wit/world.wit`'s `interface mutations` and the `run-typed` export are
-that alternative, built so the two can be measured against each other.
-Both channels are compiled into the same component (two exports);
-`mountApp`'s `channel` option picks one, and both feed the identical
-`DomApplier`, so the DOM work is common and the delta is purely
-encode/transport/decode. `host/tests/typed_test.ts` asserts the two
-produce identical DOM for the same interaction sequence — without that,
-the numbers below would mean nothing.
+The byte format was documented normatively in `wit/world.wit`'s `run` doc
+comment: opcodes, operand widths and framing all live in prose, and the
+encoder (formerly `src/protocol.rs`) and decoder (formerly
+`host/src/decoder.ts`) were two independent hand-written implementations of
+it that could only be kept in agreement by golden vectors and review. The
+obvious maintainability alternative was to spell the vocabulary as WIT —
+records plus one `operation` variant — and ship `stream<operation>`
+instead of `stream<u8>`, letting bindgen own both sides.
+
+`wit/world.wit`'s `interface mutations` and the (then-separate) `run-typed`
+export were that alternative, built so the two could be measured against
+each other. Both channels were compiled into the same component (two
+exports); `mountApp`'s `channel` option picked one, and both fed the
+identical `DomApplier`, so the DOM work was common and the delta was purely
+encode/transport/decode. `host/tests/typed_test.ts` (since replaced by an
+absolute-assertion test, its differential reference implementation having
+been retired) asserted the two produced identical DOM for the same
+interaction sequence — without that, the numbers below would have meant
+nothing.
 
 ### What the schema costs before you measure anything
 
@@ -172,26 +181,29 @@ typed schema therefore carries the template as an *arena* — a flat
 `nodes` list plus `u32` indices in `roots` and `children` — which is a
 strictly weaker encoding than the byte format's self-delimiting
 recursive grammar: it admits out-of-range and cyclic index graphs that
-the byte grammar cannot express, so `applyTyped` needs explicit
-validation the byte decoder never needed (`host/src/typed.ts`'s
-`rehydrateTemplateArena`). That is a real dent in the maintainability
-case, independent of speed.
+the byte grammar could not express, so `applyOperations` (formerly
+`applyTyped`) needs explicit validation the byte decoder never needed
+(`host/src/operations.ts`'s `rehydrateTemplateArena`). That is a real dent
+in the maintainability case, independent of speed, and it did not go away
+when the byte channel was retired — it is the cost of the schema that
+remains.
 
-The typed channel also gives up `readDirect`: polyengine's zero-copy
-direct-read session is `stream<u8>` only (embedder-api amendment A21),
-so the host reads with ordinary `read()` and pays a copy per batch. It
-does **not** reintroduce the A15 host-retention hazard that killed the
-call transport (see the historical section below): A15 licenses
-quiescence on a retained end, a parked operation, *or* an unfinished
-pump, and the host holds the lifted readable end for the instance's
-lifetime, so the guest scheduler's persistent park is exactly as legal
-here as on the byte channel. No deadlock trap fired in any run.
+The typed channel also gave up `readDirect`: polyengine's zero-copy
+direct-read session is `stream<u8>` only, so the host read with ordinary
+`read()` and paid a copy per batch. It did **not** reintroduce the
+host-retention hazard that killed the call transport (see the historical
+section below): that rule licenses quiescence on a retained end, a parked
+operation, *or* an unfinished pump (.deps/polyengine/contracts/
+embedder-api.md §"Streams and futures", issue #162), and the host holds the
+lifted readable end for the instance's lifetime, so the guest scheduler's
+persistent park was exactly as legal here as on the byte channel. No
+deadlock trap fired in any run.
 
 Third, `use mutations.{operation}` in the world makes the interface an
 import of every component built against it — including components that
-only ever call `run`. The host supplies nothing (the interface has no
-items), but the byte channel's own component type changed to add a
-typed channel it does not use.
+only ever called `run`. The host supplies nothing (the interface has no
+items), but the byte channel's own component type changed to add a typed
+channel it did not use — moot now that there is only one channel.
 
 ### Measured
 
@@ -286,7 +298,7 @@ Several lift strategies run against the same guest memory at the same
 rendezvous, interleaved in one timed loop so none is measured under a
 different JIT state, each asserted element-by-element to produce the
 same values as the interpreter and the same sink calls as
-`host/src/typed.ts`:
+`host/src/operations.ts` (then `host/src/typed.ts`):
 
 | strategy | ns/element, 9e17dc9 | ns/element, 22b5d3d |
 | --- | --- | --- |
@@ -492,18 +504,18 @@ see the numbers-are-box-relative guardrail below.)
 # bench-rows results — 2026-09-04
 
 - Deno: 2.9.5 (aarch64-unknown-linux-gnu)
-- git rev: 9f26b55-dirty
+- git rev: 813b31c-dirty
 - Box note: numbers are box-relative — compare columns within this run, not across machines. See bench/README.md.
 
-| op | bytes (ms, median of 5) | typed (ms, median of 5) | typed / bytes |
-| --- | --- | --- | --- |
-| create-1k | 9.51 | 15.97 | 1.68x |
-| create-10k | 76.21 | 151.89 | 1.99x |
-| append-1k | 85.77 | 90.89 | 1.06x |
-| update-every-10th | 3.77 | 4.84 | 1.28x |
-| swap-rows | 4.54 | 4.99 | 1.10x |
-| remove-row | 3.05 | 5.56 | 1.82x |
-| clear | 4.23 | 5.01 | 1.18x |
+| op | ms (median of 5) |
+| --- | --- |
+| create-1k | 22.15 |
+| create-10k | 192.22 |
+| append-1k | 92.77 |
+| update-every-10th | 5.39 |
+| swap-rows | 3.47 |
+| remove-row | 4.04 |
+| clear | 7.44 |
 
 <!-- LATEST-LOCAL-NUMBERS:END -->
 </content>

@@ -1,21 +1,26 @@
-// Equivalence test: the byte channel (`run`/decodeBatch) and the typed
-// channel (`run-typed`/applyTyped) must produce identical DOM output for
-// the same interaction sequence against the same component. A benchmark of
-// a wrong implementation is worthless, so this is the load-bearing test for
-// the typed track.
+// Mounts the real counter example (examples/counter/src/lib.rs) and asserts
+// the resulting `innerHTML` against expected literals at each step of a
+// fixed interaction sequence, then unit-tests `applyOperations`'s riskier
+// corners directly against a recording sink.
 //
-// Uses the counter example (host/tests/counter_test.ts's mount/dispatch/
-// poll pattern) — it exercises templates (including nested children),
-// dynamic text, several attribute value kinds, event listeners, and keyed
-// list insert/remove.
+// AUTHORITY FOR THE EXPECTED LITERALS BELOW: captured from THIS repo's own
+// mountApp output before the byte mutation channel (`run`/decodeBatch) was
+// deleted, at a point where host/tests/typed_test.ts's differential test
+// ("typed channel matches byte channel") was green — i.e. the byte and
+// typed channels were proven to produce byte-for-byte identical DOM for
+// this exact sequence. That equivalence makes the captured output a
+// trustworthy oracle: this test pins today's (post-deletion) output to
+// what was, at capture time, independently cross-checked against the other
+// implementation. There is no live second implementation to diff against
+// any more (deleting one side of a differential test removes its ability
+// to prove anything), so an absolute assertion is what replaces it.
 
 import { assertEquals, assertNotEquals } from "jsr:@std/assert@1";
 import { parseHTML } from "linkedom";
 import { defaultTranslator } from "@deltic/translator";
 import { mountApp } from "../src/host.ts";
-import type { Mounted } from "../src/host.ts";
-import { applyTyped } from "../src/typed.ts";
-import type { OpSink, TemplateNodeDesc } from "../src/decoder.ts";
+import { applyOperations } from "../src/operations.ts";
+import type { OpSink, TemplateNodeDesc } from "../src/applier.ts";
 
 const COMPONENT_PATH = "../../examples/build/counter.component.wasm";
 
@@ -75,7 +80,39 @@ function click(): TrackedEvent {
   };
 }
 
-async function mountOn(channel: "bytes" | "typed"): Promise<{ root: Element; mounted: Mounted; errors: unknown[] }> {
+const EXPECTED_INITIAL =
+  '<div class="app"><section class="counter"><button data-dioxus-id="2" id="dec">-</button>' +
+  '<span id="count">0</span><button data-dioxus-id="3" id="inc">+</button>' +
+  '<p class="even" id="parity">count is 0</p></section><section class="echo">' +
+  '<input data-dioxus-id="5" id="draft"><p id="echo"></p></section><section class="list">' +
+  '<button data-dioxus-id="6" id="add">add</button><button data-dioxus-id="7" id="remove">remove</button>' +
+  '<ul id="items"><li>alpha</li><li>beta</li></ul></section>' +
+  '<form data-dioxus-id="8" id="form"><input id="who" name="who">' +
+  '<button type="submit" id="submit">submit</button><p id="submitted">submitted 0 time(s)</p></form></div>';
+
+const EXPECTED_AFTER_INC1 = EXPECTED_INITIAL
+  .replace('<span id="count">0</span>', '<span id="count">1</span>')
+  .replace('class="even" id="parity">count is 0<', 'class="odd" id="parity">count is 1<');
+
+const EXPECTED_AFTER_INC2 = EXPECTED_INITIAL
+  .replace('<span id="count">0</span>', '<span id="count">2</span>')
+  .replace('class="even" id="parity">count is 0<', 'class="even" id="parity">count is 2<');
+
+const EXPECTED_AFTER_DEC = EXPECTED_AFTER_INC1; // 2 -> 1: back to the same rendered string as after the first inc
+
+const EXPECTED_AFTER_INC3 = EXPECTED_AFTER_INC2; // 1 -> 2: same rendered string as after the second inc
+
+const EXPECTED_AFTER_INPUT = EXPECTED_AFTER_INC3
+  .replace('<input data-dioxus-id="5" id="draft">', '<input value="hello" data-dioxus-id="5" id="draft">')
+  .replace('<p id="echo"></p>', '<p id="echo">hello</p>');
+
+const EXPECTED_AFTER_LIST = EXPECTED_AFTER_INPUT
+  .replace('<ul id="items"><li>alpha</li><li>beta</li></ul>', '<ul id="items"><li>alpha</li><li>beta</li><li>item-0</li></ul>');
+
+const EXPECTED_AFTER_SUBMIT = EXPECTED_AFTER_LIST
+  .replace('<p id="submitted">submitted 0 time(s)</p>', '<p id="submitted">submitted 1 time(s)</p>');
+
+Deno.test("mountApp + applyOperations: counter example, full interaction sequence, absolute DOM assertions", async () => {
   const root = makeRoot();
   const componentBytes = await loadComponentBytes();
   const translator = await defaultTranslator();
@@ -83,85 +120,63 @@ async function mountOn(channel: "bytes" | "typed"): Promise<{ root: Element; mou
   const mounted = await mountApp({
     source: { componentBytes, translator },
     root,
-    channel,
     onError: (err) => errors.push(err),
   });
-  await waitFor(() => root.querySelector("#count") !== null, `${channel}: initial mount`);
-  return { root, mounted, errors };
-}
-
-Deno.test("typed channel matches byte channel: counter example, full interaction sequence", async () => {
-  const bytes = await mountOn("bytes");
-  const typed = await mountOn("typed");
-
-  function assertSame(step: string) {
-    assertEquals(typed.root.innerHTML, bytes.root.innerHTML, `DOM mismatch after ${step}`);
-  }
-
-  assertSame("initial mount");
-  assertEquals(bytes.errors, []);
-  assertEquals(typed.errors, []);
+  await waitFor(() => root.querySelector("#count") !== null, "initial mount");
+  assertEquals(root.innerHTML, EXPECTED_INITIAL, "initial mount");
+  assertEquals(errors, []);
 
   // +/- buttons: set-text + set-attribute (class toggling even/odd).
+  const steps: [string, string][] = [
+    ["inc", EXPECTED_AFTER_INC1],
+    ["inc", EXPECTED_AFTER_INC2],
+    ["dec", EXPECTED_AFTER_DEC],
+    ["inc", EXPECTED_AFTER_INC3],
+  ];
   let expectedCount = 0;
-  for (const step of ["inc", "inc", "dec", "inc"]) {
+  for (const [step, expected] of steps) {
     expectedCount += step === "inc" ? 1 : -1;
     const want = String(expectedCount);
-    bytes.mounted.dispatch(byId(bytes.root, step), "click", click());
-    typed.mounted.dispatch(byId(typed.root, step), "click", click());
-    await waitFor(() => byId(bytes.root, "count").textContent === want, `${step} (bytes)`);
-    await waitFor(() => byId(typed.root, "count").textContent === want, `${step} (typed)`);
-    assertSame(`click ${step}`);
+    mounted.dispatch(byId(root, step), "click", click());
+    await waitFor(() => byId(root, "count").textContent === want, `click ${step}`);
+    assertEquals(root.innerHTML, expected, `after click ${step}`);
   }
 
   // Typed text input: attribute of "text" kind (value) plus dynamic text.
-  bytes.mounted.dispatch(byId(bytes.root, "draft"), "input", { type: "input", value: "hello" });
-  typed.mounted.dispatch(byId(typed.root, "draft"), "input", { type: "input", value: "hello" });
-  await waitFor(() => byId(bytes.root, "echo").textContent === "hello", "input (bytes)");
-  await waitFor(() => byId(typed.root, "echo").textContent === "hello", "input (typed)");
-  assertSame("typed input");
+  mounted.dispatch(byId(root, "draft"), "input", { type: "input", value: "hello" });
+  await waitFor(() => byId(root, "echo").textContent === "hello", "input");
+  assertEquals(root.innerHTML, EXPECTED_AFTER_INPUT, "after typed input");
 
   // List add/add/remove: keyed diff exercises load-template (nested
   // template children: li > text) / assign-id / replace-placeholder /
   // remove.
   for (const step of ["add", "add", "remove"]) {
-    bytes.mounted.dispatch(byId(bytes.root, step), "click", click());
-    typed.mounted.dispatch(byId(typed.root, step), "click", click());
+    mounted.dispatch(byId(root, step), "click", click());
   }
-  await waitFor(
-    () => bytes.root.querySelectorAll("#items li").length === 3,
-    "list settle (bytes)",
-  );
-  await waitFor(
-    () => typed.root.querySelectorAll("#items li").length === 3,
-    "list settle (typed)",
-  );
-  assertSame("list add/add/remove");
+  await waitFor(() => root.querySelectorAll("#items li").length === 3, "list settle");
+  assertEquals(root.innerHTML, EXPECTED_AFTER_LIST, "after list add/add/remove");
 
-  // Form submit: onsubmit calls prevent_default(); assert the DOM (submitted
-  // counter text) stays identical across channels.
-  bytes.mounted.dispatch(byId(bytes.root, "form"), "submit", { ...click(), type: "submit" });
-  typed.mounted.dispatch(byId(typed.root, "form"), "submit", { ...click(), type: "submit" });
-  await waitFor(() => byId(bytes.root, "submitted").textContent === "submitted 1 time(s)", "submit (bytes)");
-  await waitFor(() => byId(typed.root, "submitted").textContent === "submitted 1 time(s)", "submit (typed)");
-  assertSame("form submit");
+  // Form submit: onsubmit calls prevent_default(); assert the DOM
+  // (submitted counter text) matches.
+  mounted.dispatch(byId(root, "form"), "submit", { ...click(), type: "submit" });
+  await waitFor(() => byId(root, "submitted").textContent === "submitted 1 time(s)", "submit");
+  assertEquals(root.innerHTML, EXPECTED_AFTER_SUBMIT, "after form submit");
 
-  assertEquals(bytes.errors, [], "no onError on the byte channel");
-  assertEquals(typed.errors, [], "no onError on the typed channel");
+  assertEquals(errors, [], "no onError on the mutation channel");
 
-  bytes.mounted.dispose();
-  typed.mounted.dispose();
+  mounted.dispose();
 });
 
-// -- typed-path risk areas: unit tests directly against applyTyped --------
+// -- applyOperations risk areas: unit tests directly against a recording --
+// OpSink -------------------------------------------------------------------
 //
 // The counter example above never happens to emit a template with more
 // than one level of nesting under `register-template` per templates
 // batch, nor a non-text `attr-value` case (dioxus's own attribute encoding
 // only uses `text` for string-interpolated attrs, which is everything
-// counter has) — so those two typed-path-specific risks (the arena
-// rehydration walk; the four non-text attr-value cases) are exercised
-// here directly against a recording OpSink, independent of any guest.
+// counter has) — so those two risks (the arena rehydration walk; the four
+// non-text attr-value cases) are exercised here directly against a
+// recording OpSink, independent of any guest.
 
 function recordingSink(ops: unknown[]): OpSink {
   return {
@@ -231,7 +246,7 @@ function recordingSink(ops: unknown[]): OpSink {
   };
 }
 
-Deno.test("applyTyped: register-template arena rehydrates nested children into a tree", () => {
+Deno.test("applyOperations: register-template arena rehydrates nested children into a tree", () => {
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
 
@@ -248,7 +263,7 @@ Deno.test("applyTyped: register-template arena rehydrates nested children into a
     { kind: "dynamic" },
     { kind: "text", value: "text1" },
   ];
-  applyTyped([{ kind: "register-template", value: { id: 7, nodes, roots: [0] } }] as never, sink);
+  applyOperations([{ kind: "register-template", value: { id: 7, nodes, roots: [0] } }] as never, sink);
 
   assertEquals(ops.length, 1);
   const roots = (ops[0] as { roots: TemplateNodeDesc[] }).roots;
@@ -273,11 +288,11 @@ Deno.test("applyTyped: register-template arena rehydrates nested children into a
   ]);
 });
 
-Deno.test("applyTyped: register-template rejects an out-of-range arena index", () => {
+Deno.test("applyOperations: register-template rejects an out-of-range arena index", () => {
   const nodes = [{ kind: "element", value: { tag: 0, attrs: [], children: [99] } }];
   let threw = false;
   try {
-    applyTyped(
+    applyOperations(
       [{ kind: "register-template", value: { id: 0, nodes, roots: [0] } }] as never,
       recordingSink([]),
     );
@@ -288,12 +303,12 @@ Deno.test("applyTyped: register-template rejects an out-of-range arena index", (
   assertEquals(threw, true, "expected a thrown Error, not a silently wrong tree");
 });
 
-Deno.test("applyTyped: register-template rejects a cyclic arena", () => {
+Deno.test("applyOperations: register-template rejects a cyclic arena", () => {
   // nodes[0].children includes 0 itself.
   const nodes = [{ kind: "element", value: { tag: 0, attrs: [], children: [0] } }];
   let threw = false;
   try {
-    applyTyped(
+    applyOperations(
       [{ kind: "register-template", value: { id: 0, nodes, roots: [0] } }] as never,
       recordingSink([]),
     );
@@ -304,11 +319,11 @@ Deno.test("applyTyped: register-template rejects a cyclic arena", () => {
   assertEquals(threw, true, "expected a thrown Error, not a hang");
 });
 
-Deno.test("applyTyped: set-attribute's non-text attr-value cases survive to the sink", () => {
+Deno.test("applyOperations: set-attribute's non-text attr-value cases survive to the sink", () => {
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
 
-  applyTyped(
+  applyOperations(
     [
       { kind: "set-attribute", value: { id: 1, name: 2, value: { kind: "float", value: 1.5 } } },
       { kind: "set-attribute", value: { id: 1, name: 3, value: { kind: "int", value: 42n } } },
@@ -328,10 +343,10 @@ Deno.test("applyTyped: set-attribute's non-text attr-value cases survive to the 
   assertEquals(typeof (ops[1] as { value: unknown }).value, "bigint");
 });
 
-Deno.test("applyTyped: option<str-ref> ns absent lifts to null, not {kind:'none'}", () => {
+Deno.test("applyOperations: option<str-ref> ns absent lifts to null, not {kind:'none'}", () => {
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
-  applyTyped(
+  applyOperations(
     [{ kind: "set-attribute", value: { id: 1, name: 2, value: { kind: "text", value: "v" } } }] as never,
     sink,
   );
@@ -341,20 +356,19 @@ Deno.test("applyTyped: option<str-ref> ns absent lifts to null, not {kind:'none'
 
 // -- F12 coverage gaps ------------------------------------------------------
 //
-// The counter example's full-stack equivalence test above never exercises
-// these shapes (its listeners are all bubbling, its templates are
-// single-root with no namespaced attrs, and its list never empties to a
-// placeholder) — cheap unit cases against the recording sink instead of new
-// integration mounts.
+// The counter example's full-stack test above never exercises these shapes
+// (its listeners are all bubbling, its templates are single-root with no
+// namespaced attrs, and its list never empties to a placeholder) — cheap
+// unit cases against the recording sink instead of new integration mounts.
 
-Deno.test("applyTyped: new-event-listener/remove-event-listener carry bubbles verbatim, both values", () => {
+Deno.test("applyOperations: new-event-listener/remove-event-listener carry bubbles verbatim, both values", () => {
   // This matters more than most: an inverted `bubbles` bit would NOT show
   // up in an innerHTML diff at all (it only changes the host's listener
   // delegation strategy — root-delegated vs per-element — not the
   // markup), so this has to be asserted directly against the sink.
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
-  applyTyped(
+  applyOperations(
     [
       { kind: "new-event-listener", value: { id: 1, name: 10, bubbles: true } },
       { kind: "new-event-listener", value: { id: 2, name: 11, bubbles: false } },
@@ -371,12 +385,12 @@ Deno.test("applyTyped: new-event-listener/remove-event-listener carry bubbles ve
   ]);
 });
 
-Deno.test("applyTyped: option<str-ref> ns PRESENT lifts to the bare id, on set-attribute and template attrs", () => {
+Deno.test("applyOperations: option<str-ref> ns PRESENT lifts to the bare id, on set-attribute and template attrs", () => {
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
 
   // set-attribute path.
-  applyTyped(
+  applyOperations(
     [{ kind: "set-attribute", value: { id: 1, name: 2, ns: 9, value: { kind: "text", value: "v" } } }] as never,
     sink,
   );
@@ -388,12 +402,12 @@ Deno.test("applyTyped: option<str-ref> ns PRESENT lifts to the bare id, on set-a
   const nodes = [
     { kind: "element", value: { tag: 0, ns: 9, attrs: [{ name: 3, ns: 9, value: "v" }], children: [] } },
   ];
-  applyTyped([{ kind: "register-template", value: { id: 0, nodes, roots: [0] } }] as never, sink);
+  applyOperations([{ kind: "register-template", value: { id: 0, nodes, roots: [0] } }] as never, sink);
   const roots = (ops[0] as { roots: TemplateNodeDesc[] }).roots;
   assertEquals(roots, [{ kind: "element", tag: 0, ns: 9, attrs: [{ name: 3, ns: 9, value: "v" }], children: [] }]);
 });
 
-Deno.test("applyTyped: register-template with multiple roots indexes each root correctly", () => {
+Deno.test("applyOperations: register-template with multiple roots indexes each root correctly", () => {
   // Arena for two roots: root0 = text "a", root1 = element with a child.
   //   nodes[0] = text "a"           (root 0)
   //   nodes[1] = element, children = [2]   (root 1)
@@ -405,7 +419,7 @@ Deno.test("applyTyped: register-template with multiple roots indexes each root c
     { kind: "element", value: { tag: 0, attrs: [], children: [2] } },
     { kind: "text", value: "b" },
   ];
-  applyTyped([{ kind: "register-template", value: { id: 0, nodes, roots: [0, 1] } }] as never, sink);
+  applyOperations([{ kind: "register-template", value: { id: 0, nodes, roots: [0, 1] } }] as never, sink);
 
   const roots = (ops[0] as { roots: TemplateNodeDesc[] }).roots;
   assertEquals(roots, [
@@ -420,9 +434,9 @@ Deno.test("applyTyped: register-template with multiple roots indexes each root c
   ]);
 });
 
-Deno.test("applyTyped: create-placeholder reaches the sink with the bare element id", () => {
+Deno.test("applyOperations: create-placeholder reaches the sink with the bare element id", () => {
   const ops: unknown[] = [];
   const sink = recordingSink(ops);
-  applyTyped([{ kind: "create-placeholder", value: 4 }] as never, sink);
+  applyOperations([{ kind: "create-placeholder", value: 4 }] as never, sink);
   assertEquals(ops, [{ op: "create-placeholder", id: 4 }]);
 });

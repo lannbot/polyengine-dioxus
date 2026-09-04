@@ -1,7 +1,8 @@
-//! Host-transport test fixture: no-dioxus guest exercising the stream
-//! mutation transport and the round-trip event path.
+//! Host test fixture: no-dioxus guest exercising the mutation channel and
+//! the round-trip event path.
 //!
-//! Governing doc: wit/world.wit (normative wire format + world `app`).
+//! Governing doc: wit/world.wit (the `mutations` interface — the normative
+//! operation schema — and the world `app`).
 //! Op-sequence/behavior spec: the polyengine-dioxus host-runtime dispatch
 //! (fixtures/surface-probe territory) — see its "Behavior" section for the
 //! exact template/listener layout this file builds; cited inline as
@@ -32,7 +33,7 @@
 //!
 //! Reused across BOTH roles where the text is identical (e.g. the string
 //! "input" serves as both the second template's tag name and the third
-//! listener's event name — same interned slot, no wire-format rule forbids
+//! listener's event name — same interned slot, nothing in the schema forbids
 //! it): 0=`section` 1=`class` 2=`click` 3=`keydown` 4=`input` 5=`title`
 //! 6=`disabled` 7=`touchstart`. `handle-event`'s `name: u16` therefore
 //! arrives as one of {2, 3, 4, 7} for our own listeners;
@@ -73,168 +74,12 @@ wit_bindgen::generate!({
 
 use core::cell::RefCell;
 use polymorph::dioxus::events::{DomEvent as HostDomEvent, Modifiers};
-
-// -- wire encoding ------------------------------------------------------------
-//
-// Mirrors host/src/decoder.ts's Cursor, in reverse (encode instead of
-// decode). The byte layout is normative in wit/world.wit's "# Opcodes" /
-// "# Primitive operand encodings" doc comments (reproduced above the
-// `generate!` call via the WIT source itself); cited inline as
-// `wit:<opcode>`.
-mod wire {
-    const NONE_STRREF: u16 = 0xffff;
-
-    pub struct Encoder {
-        pub ops: Vec<u8>,
-        pub strings: String,
-    }
-
-    impl Encoder {
-        pub fn new() -> Self {
-            Self { ops: Vec::new(), strings: String::new() }
-        }
-
-        fn u8(&mut self, v: u8) {
-            self.ops.push(v);
-        }
-        fn u16(&mut self, v: u16) {
-            self.ops.extend_from_slice(&v.to_le_bytes());
-        }
-        fn u32(&mut self, v: u32) {
-            self.ops.extend_from_slice(&v.to_le_bytes());
-        }
-
-        /// strref: u16, 0xffff = none (wit "Primitive operand encodings").
-        fn strref(&mut self, v: Option<u16>) {
-            self.u16(v.unwrap_or(NONE_STRREF));
-        }
-
-        /// path: u8 length, then that many u8 child indices.
-        fn path(&mut self, p: &[u8]) {
-            self.u8(p.len() as u8);
-            self.ops.extend_from_slice(p);
-        }
-
-        /// dynstr: u16 UTF-16 code-unit length, then content appended to the
-        /// string segment (wit "Primitive operand encodings" — the u32
-        /// extended-length form is never needed by this fixture's short
-        /// ASCII strings).
-        fn dynstr(&mut self, s: &str) {
-            let len16: usize = s.chars().map(char::len_utf16).sum();
-            self.u16(len16 as u16);
-            self.strings.push_str(s);
-        }
-
-        // -- ops (wit:0x01.."0x11) --------------------------------------------
-
-        pub fn cache_string(&mut self, id: u16, s: &str) {
-            self.u8(0x01);
-            self.u16(id);
-            self.dynstr(s);
-        }
-
-        /// Begin `register-template`; caller writes `nroots` node trees via
-        /// `element_start`/`attr`/`children_count`/`text_node`/`dynamic_node`
-        /// in wire order (depth-first, matching decodeTemplateNode).
-        pub fn register_template_header(&mut self, tmpl: u16, nroots: u16) {
-            self.u8(0x02);
-            self.u16(tmpl);
-            self.u16(nroots);
-        }
-        pub fn tmpl_element_header(&mut self, tag: u16, ns: Option<u16>, nattrs: u16) {
-            self.u8(0x00); // node kind: element
-            self.u16(tag);
-            self.strref(ns);
-            self.u16(nattrs);
-        }
-        pub fn tmpl_attr(&mut self, name: u16, ns: Option<u16>, value: &str) {
-            self.u16(name);
-            self.strref(ns);
-            self.dynstr(value);
-        }
-        pub fn tmpl_children_header(&mut self, nchildren: u16) {
-            self.u16(nchildren);
-        }
-        pub fn tmpl_text(&mut self, value: &str) {
-            self.u8(0x01);
-            self.dynstr(value);
-        }
-        pub fn tmpl_dynamic(&mut self) {
-            self.u8(0x02);
-        }
-
-        pub fn append_children(&mut self, id: u32, m: u32) {
-            self.u8(0x03);
-            self.u32(id);
-            self.u32(m);
-        }
-        pub fn assign_id(&mut self, path: &[u8], id: u32) {
-            self.u8(0x04);
-            self.path(path);
-            self.u32(id);
-        }
-        pub fn create_text_node(&mut self, id: u32, text: &str) {
-            self.u8(0x06);
-            self.u32(id);
-            self.dynstr(text);
-        }
-        pub fn load_template(&mut self, tmpl: u16, root: u16, id: u32) {
-            self.u8(0x07);
-            self.u16(tmpl);
-            self.u16(root);
-            self.u32(id);
-        }
-        pub fn replace_placeholder(&mut self, path: &[u8], m: u32) {
-            self.u8(0x09);
-            self.path(path);
-            self.u32(m);
-        }
-        pub fn set_attribute_text(&mut self, id: u32, name: u16, ns: Option<u16>, value: &str) {
-            self.u8(0x0c);
-            self.u32(id);
-            self.u16(name);
-            self.strref(ns);
-            self.u8(0x00); // attrval kind: text
-            self.dynstr(value);
-        }
-        pub fn set_attribute_bool(&mut self, id: u32, name: u16, ns: Option<u16>, value: bool) {
-            self.u8(0x0c);
-            self.u32(id);
-            self.u16(name);
-            self.strref(ns);
-            self.u8(0x03); // attrval kind: bool
-            self.u8(value as u8);
-        }
-        pub fn set_text(&mut self, id: u32, text: &str) {
-            self.u8(0x0d);
-            self.u32(id);
-            self.dynstr(text);
-        }
-        pub fn new_event_listener(&mut self, id: u32, name: u16, bubbles: bool) {
-            self.u8(0x0e);
-            self.u32(id);
-            self.u16(name);
-            self.u8(bubbles as u8); // flags bit0 = bubbles
-        }
-
-        pub fn finish(self) -> (Vec<u8>, String) {
-            (self.ops, self.strings)
-        }
-    }
-
-    /// Stream-transport framing (wit/world.wit "# Framing"):
-    /// `frame-len:u32 strings-len:u32 strings ops`.
-    pub fn frame(ops: &[u8], strings: &str) -> Vec<u8> {
-        let strings_bytes = strings.as_bytes();
-        let frame_len = 4 + strings_bytes.len() as u32 + ops.len() as u32;
-        let mut buf = Vec::with_capacity(4 + frame_len as usize);
-        buf.extend_from_slice(&frame_len.to_le_bytes());
-        buf.extend_from_slice(&(strings_bytes.len() as u32).to_le_bytes());
-        buf.extend_from_slice(strings_bytes);
-        buf.extend_from_slice(ops);
-        buf
-    }
-}
+// `Operation` itself is already in scope: the world `use`s it, so
+// `generate!` re-exports it at the crate root.
+use polymorph::dioxus::mutations::{
+    AssignId, AttrValue, CacheString, CreateTextNode, EventListener, LoadTemplate, PathOp,
+    RegisterTemplate, SetAttribute, SetText, StackOp, TemplateAttr, TemplateElement, TemplateNode,
+};
 
 // -- interned string ids (see module doc) ------------------------------------
 
@@ -259,62 +104,92 @@ fn event_name_for_id(id: u16) -> &'static str {
 
 /// Builds the initial batch: see the module doc's "DOM built" section for
 /// the exact op sequence and its rationale.
-fn build_initial_batch() -> (Vec<u8>, String) {
-    let mut e = wire::Encoder::new();
+fn build_initial_batch() -> Vec<Operation> {
+    fn cache(id: u16, s: &str) -> Operation {
+        Operation::CacheString(CacheString { id, str: s.to_string() })
+    }
 
-    e.cache_string(STR_SECTION, "section");
-    e.cache_string(STR_CLASS, "class");
-    e.cache_string(STR_CLICK, "click");
-    e.cache_string(STR_KEYDOWN, "keydown");
-    e.cache_string(STR_INPUT, "input");
-    e.cache_string(STR_TITLE, "title");
-    e.cache_string(STR_DISABLED, "disabled");
-    e.cache_string(STR_TOUCHSTART, "touchstart");
-
-    // register-template(tmpl=0): <section class="probe">hdr{dyn}{dyn}</section>
-    e.register_template_header(0, 1);
-    e.tmpl_element_header(STR_SECTION, None, 1);
-    e.tmpl_attr(STR_CLASS, None, "probe");
-    e.tmpl_children_header(3);
-    e.tmpl_text("hdr");
-    e.tmpl_dynamic(); // idx1 — replaced below with the "ready" text node
-    e.tmpl_dynamic(); // idx2 — left as a bare placeholder, assign-id'd
-
-    // register-template(tmpl=1): <input>
-    e.register_template_header(1, 1);
-    e.tmpl_element_header(STR_INPUT, None, 0);
-    e.tmpl_children_header(0);
-
-    // load-template(tmpl=0) -> id=1 (section); stack: [root, section]
-    e.load_template(0, 0, 1);
-    // assign-id exercised on the OTHER dynamic slot (idx2), independently
-    // of the replace-placeholder below (dispatch: "assign-id ... exercise
-    // ... independently").
-    e.assign_id(&[2], 4);
-    // create-text-node(id=2, "ready"); stack: [root, section, text(2)]
-    e.create_text_node(2, "ready");
-    // replace-placeholder(path=[1], m=1): pop text(2), replace idx1 slot.
-    // stack: [root, section]
-    e.replace_placeholder(&[1], 1);
-    // set-attribute TEXT on section.
-    e.set_attribute_text(1, STR_TITLE, None, "probe-section");
-    // three bubbling listeners on section.
-    e.new_event_listener(1, STR_CLICK, true);
-    e.new_event_listener(1, STR_KEYDOWN, true);
-    e.new_event_listener(1, STR_TOUCHSTART, true);
-    // append-children(root, m=1): pop section, attach under root.
-    e.append_children(0, 1);
-
-    // load-template(tmpl=1) -> id=5 (input); stack: [root, input]
-    e.load_template(1, 0, 5);
-    // set-attribute BOOL (false -> removed by the applier's boolean-
-    // attribute table; exercises the bool attrval path regardless).
-    e.set_attribute_bool(5, STR_DISABLED, None, false);
-    e.new_event_listener(5, STR_INPUT, true);
-    // append-children(root, m=1): pop input, attach under root.
-    e.append_children(0, 1);
-
-    e.finish()
+    vec![
+        cache(STR_SECTION, "section"),
+        cache(STR_CLASS, "class"),
+        cache(STR_CLICK, "click"),
+        cache(STR_KEYDOWN, "keydown"),
+        cache(STR_INPUT, "input"),
+        cache(STR_TITLE, "title"),
+        cache(STR_DISABLED, "disabled"),
+        cache(STR_TOUCHSTART, "touchstart"),
+        // register-template(tmpl=0): <section class="probe">hdr{dyn}{dyn}</section>
+        // `nodes` is the arena, in pre-order; `roots` and `children` index
+        // into it (wit: `register-template` is not a tree — recursive WIT
+        // types are rejected).
+        Operation::RegisterTemplate(RegisterTemplate {
+            id: 0,
+            nodes: vec![
+                TemplateNode::Element(TemplateElement {
+                    tag: STR_SECTION,
+                    ns: None,
+                    attrs: vec![TemplateAttr {
+                        name: STR_CLASS,
+                        ns: None,
+                        value: "probe".to_string(),
+                    }],
+                    children: vec![1, 2, 3],
+                }),
+                TemplateNode::Text("hdr".to_string()),
+                TemplateNode::Dynamic, // child idx1 — replaced below with "ready"
+                TemplateNode::Dynamic, // child idx2 — left bare, assign-id'd
+            ],
+            roots: vec![0],
+        }),
+        // register-template(tmpl=1): <input>
+        Operation::RegisterTemplate(RegisterTemplate {
+            id: 1,
+            nodes: vec![TemplateNode::Element(TemplateElement {
+                tag: STR_INPUT,
+                ns: None,
+                attrs: Vec::new(),
+                children: Vec::new(),
+            })],
+            roots: vec![0],
+        }),
+        // load-template(tmpl=0) -> id=1 (section); stack: [root, section]
+        Operation::LoadTemplate(LoadTemplate { id: 1, tmpl: 0, root: 0 }),
+        // assign-id exercised on the OTHER dynamic slot (idx2), independently
+        // of the replace-placeholder below (dispatch: "assign-id ... exercise
+        // ... independently").
+        Operation::AssignId(AssignId { path: vec![2], id: 4 }),
+        // create-text-node(id=2, "ready"); stack: [root, section, text(2)]
+        Operation::CreateTextNode(CreateTextNode { id: 2, text: "ready".to_string() }),
+        // replace-placeholder(path=[1], m=1): pop text(2), replace idx1 slot.
+        // stack: [root, section]
+        Operation::ReplacePlaceholder(PathOp { path: vec![1], m: 1 }),
+        // set-attribute TEXT on section.
+        Operation::SetAttribute(SetAttribute {
+            id: 1,
+            name: STR_TITLE,
+            ns: None,
+            value: AttrValue::Text("probe-section".to_string()),
+        }),
+        // three bubbling listeners on section.
+        Operation::NewEventListener(EventListener { id: 1, name: STR_CLICK, bubbles: true }),
+        Operation::NewEventListener(EventListener { id: 1, name: STR_KEYDOWN, bubbles: true }),
+        Operation::NewEventListener(EventListener { id: 1, name: STR_TOUCHSTART, bubbles: true }),
+        // append-children(root, m=1): pop section, attach under root.
+        Operation::AppendChildren(StackOp { id: 0, m: 1 }),
+        // load-template(tmpl=1) -> id=5 (input); stack: [root, input]
+        Operation::LoadTemplate(LoadTemplate { id: 5, tmpl: 1, root: 0 }),
+        // set-attribute BOOL (false -> removed by the applier's boolean-
+        // attribute table; exercises the bool attr-value path regardless).
+        Operation::SetAttribute(SetAttribute {
+            id: 5,
+            name: STR_DISABLED,
+            ns: None,
+            value: AttrValue::Boolean(false),
+        }),
+        Operation::NewEventListener(EventListener { id: 5, name: STR_INPUT, bubbles: true }),
+        // append-children(root, m=1): pop input, attach under root.
+        Operation::AppendChildren(StackOp { id: 0, m: 1 }),
+    ]
 }
 
 /// One-line deterministic summary written into the "ready" text node (id 2)
@@ -377,49 +252,44 @@ fn summarize(name: u16, payload: &Payload) -> (String, bool) {
     }
 }
 
-fn build_event_batch(name: u16, payload: &Payload) -> (Vec<u8>, String, bool) {
+fn build_event_batch(name: u16, payload: &Payload) -> (Vec<Operation>, bool) {
     let (summary, prevent) = summarize(name, payload);
-    let mut e = wire::Encoder::new();
-    e.set_text(2, &summary);
-    let (ops, strings) = e.finish();
-    (ops, strings, prevent)
+    (vec![Operation::SetText(SetText { id: 2, text: summary })], prevent)
 }
 
-// The stream transport's writer half. `run` creates it and parks it here;
+// The mutation channel's writer half. `run` creates it and parks it here;
 // the spawned initial-batch task and every later `handle-event` write take
 // it out and put it back (dispatch: "stash the writer half ...
-// in a thread_local RefCell; writes complete inline while the host session
-// is parked, so no cross-task interleaving. Do not hold RefCell borrows
+// in a thread_local RefCell; writes complete inline while the host is
+// reading, so no cross-task interleaving. Do not hold RefCell borrows
 // across awaits." — every use below `take()`s the writer out of the cell
 // before awaiting, and puts it back after, so no borrow spans an `.await`).
 // Keeping it here is also what holds the stream OPEN: dropping this writer
 // is what would signal end-of-stream to the host, so it is never dropped.
 thread_local! {
-    static WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<u8>>> = const { RefCell::new(None) };
+    static WRITER: RefCell<Option<wit_bindgen::rt::async_support::StreamWriter<Operation>>> = const { RefCell::new(None) };
 }
 
 struct Component;
 
 impl Guest for Component {
-    async fn run() -> wit_bindgen::rt::async_support::StreamReader<u8> {
+    async fn run() -> wit_bindgen::rt::async_support::StreamReader<Operation> {
         // Create the channel and hand the read end back as `run`'s return
-        // value (wit: `export run: async func() -> stream<u8>`). Nothing is
-        // written from this body: a write here would park waiting for a
-        // reader the host cannot have until this promise settles.
-        let (writer, reader) = wit_stream::new::<u8>();
+        // value (wit: `export run: async func() -> stream<operation>`).
+        // Nothing is written from this body: a write here would park waiting
+        // for a reader the host cannot have until this promise settles.
+        let (writer, reader) = wit_stream::new::<Operation>();
         WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 
         // The initial batch goes out from a spawned task, after the return.
         // Rendezvous semantics make the ordering safe: the write parks until
-        // the host's `readDirect` session is parked, so it cannot be lost by
-        // racing ahead of the host.
+        // the host reads, so it cannot be lost by racing ahead of the host.
         wit_bindgen::rt::async_support::spawn_local(async move {
-            let (ops, strings) = build_initial_batch();
-            let frame = wire::frame(&ops, &strings);
+            let batch = build_initial_batch();
             let mut writer = WRITER
                 .with(|cell| cell.borrow_mut().take())
                 .expect("initial batch: writer taken before the first write");
-            writer.write_all(frame).await;
+            writer.write_all(batch).await;
             WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
         });
         // This task ends here; the spawned task ends once the initial batch
@@ -432,27 +302,13 @@ impl Guest for Component {
         reader
     }
 
-    /// This fixture exercises the byte channel only. `run-typed` is the
-    /// other half of the spike's A/B (wit/world.wit: exactly one of
-    /// `run`/`run-typed` is called per instance), and nothing here mounts
-    /// through it — so this arm exists to satisfy the trait and closes the
-    /// stream immediately by dropping the write end.
-    async fn run_typed() -> wit_bindgen::rt::async_support::StreamReader<
-        polymorph::dioxus::mutations::Operation,
-    > {
-        let (writer, reader) = wit_stream::new::<polymorph::dioxus::mutations::Operation>();
-        drop(writer);
-        reader
-    }
-
     async fn handle_event(_target: u32, name: u16, payload: Payload, ev: &HostDomEvent) {
-        let (ops, strings, prevent) = build_event_batch(name, &payload);
+        let (batch, prevent) = build_event_batch(name, &payload);
 
-        let frame = wire::frame(&ops, &strings);
         let mut writer = WRITER
             .with(|cell| cell.borrow_mut().take())
             .expect("handle-event dispatched before run() opened the stream");
-        writer.write_all(frame).await;
+        writer.write_all(batch).await;
         WRITER.with(|cell| *cell.borrow_mut() = Some(writer));
 
         if prevent {
