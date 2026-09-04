@@ -25,12 +25,20 @@ fn Page() -> Element {
     }
 }
 
+// Markers included: `render_to` always pre-renders (see its doc). They are
+// the client's only handle on which node is which, so they belong in the
+// expectation rather than being filtered out of it — a change to the marker
+// numbering is a change to the hydration contract and should fail here.
 const EXPECTED: &str = concat!(
-    r#"<div class="app">"#,
+    r#"<div class="app" data-node-hydration="0">"#,
     "<h1>hello</h1>",
-    r#"<p class="odd">count is 3</p>"#,
-    "<ul><li>item-0</li><li>item-1</li><li>item-2</li></ul>",
-    r#"<input value="draft"/>"#,
+    r#"<p class="odd" data-node-hydration="1"><!--node-id2-->count is 3<!--#--></p>"#,
+    "<ul>",
+    r#"<li data-node-hydration="3"><!--node-id4-->item-0<!--#--></li>"#,
+    r#"<li data-node-hydration="5"><!--node-id6-->item-1<!--#--></li>"#,
+    r#"<li data-node-hydration="7"><!--node-id8-->item-2<!--#--></li>"#,
+    "</ul>",
+    r#"<input value="draft" data-node-hydration="9"/>"#,
     "</div>",
 );
 

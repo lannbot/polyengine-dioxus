@@ -243,6 +243,9 @@ function recordingSink(ops: unknown[]): OpSink {
     pushRoot(id) {
       ops.push({ op: "push-root", id });
     },
+    hydrate(ids) {
+      ops.push({ op: "hydrate", ids });
+    },
   };
 }
 

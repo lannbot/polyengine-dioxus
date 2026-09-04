@@ -2,16 +2,22 @@
 //!
 //! - [`interner`]: the `&'static str` name table behind the protocol's
 //!   `cache-string` / `str-ref` interning.
+//! - [`hydrate`]: the ElementId walk backing the protocol's `hydrate`
+//!   operation, in `dioxus-ssr` `pre-render`'s marker order.
 //! - `bindings` / `driver` / `events` / `writer` (wasm32 only): the generated
 //!   WIT bindings, the `run`/`handle-event` implementation, the
 //!   `HtmlEventConverter` over the WIT payload types, and the
 //!   `dioxus_core::WriteMutations` sink that fills a batch of
 //!   `mutations::operation` values. These are gated on
 //!   `target_arch = "wasm32"` because they name the generated bindings;
-//!   [`interner`] does not, so `cargo test` can exercise it natively.
+//!   [`interner`] and [`hydrate`] do not, so `cargo test` can exercise them
+//!   natively — and for [`hydrate`] that is the only place it can be
+//!   exercised, since checking its order means running `dioxus-ssr` beside
+//!   it.
 //!
 //! An application crate wires itself up with [`launch!`].
 
+pub mod hydrate;
 pub mod interner;
 
 #[cfg(target_arch = "wasm32")]

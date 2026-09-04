@@ -82,8 +82,9 @@ use wit_bindgen::rt::async_support::{spawn_local, StreamReader, StreamWriter};
 
 use crate::bindings::polymorph::dioxus::events::Payload;
 use crate::bindings::polymorph::dioxus::mutations::Operation;
-use crate::bindings::{wit_stream, DomEvent};
+use crate::bindings::{wit_stream, DomEvent, RenderMode};
 use crate::events::{WitEventConverter, WitEventData};
+use crate::hydrate::hydration_ids;
 use crate::interner::Interner;
 use crate::writer::MutationWriter;
 
@@ -251,7 +252,7 @@ fn render(step: impl FnOnce(&mut VirtualDom, &mut MutationWriter)) {
 /// scheduler forever), and returns the stream's read end to the host. See
 /// the module doc for why the scheduler must be a spawned task and why
 /// nothing is written before the return.
-pub async fn run(root: fn() -> Element) -> MutationStream {
+pub async fn run(root: fn() -> Element, mode: RenderMode) -> MutationStream {
     // dioxus-html's converter slot is global and write-once per process; a
     // component instance is a fresh process image, so this runs exactly once.
     dioxus_html::set_event_converter(Box::new(WitEventConverter));
@@ -274,7 +275,41 @@ pub async fn run(root: fn() -> Element) -> MutationStream {
     }));
 
     spawn_local(async move {
-        render(|dom, w| dom.rebuild(w));
+        match mode {
+            RenderMode::Fresh => render(|dom, w| dom.rebuild(w)),
+            RenderMode::Hydrate => render(|dom, w| {
+                // The rebuild still runs — it is what assigns the ElementIds
+                // the `hydrate` payload binds — but emits no node-creating
+                // operations; the listener registrations it does emit are
+                // deliberate (see `MutationWriter::suppress_nodes`).
+                w.suppress_nodes(true);
+                dom.rebuild(w);
+                let ids = hydration_ids(dom).unwrap_or_else(|e| {
+                    // Unreachable after a completed rebuild: every node the
+                    // walk visits has a mount entry by then. Reaching it
+                    // means the walk and dioxus-core disagree about the tree
+                    // — a guest bug with no recoverable branch, and
+                    // continuing would emit a shorter id list that the host
+                    // would bind positionally to the wrong nodes. Panicking
+                    // traps the instance, which surfaces to the host as a
+                    // rejected read on the mutation stream (see "How failure
+                    // surfaces" above); `expect`-style loudness matches the
+                    // uninitialized-thread-local handling elsewhere here,
+                    // while the merely-unexpected `handle-event` cases stay
+                    // on the debug_assert-and-drop path.
+                    panic!("driver: hydration walk failed: {e}")
+                });
+                // Contractual: `hydrate` must be the first operation of the
+                // first batch, ahead of the `new-event-listener` ops that
+                // reference the ids it binds (`wit/world.wit`, the `hydrate`
+                // type doc). The rebuild has already filled the batch with
+                // those listener ops, so it goes in at index 0.
+                w.batch.insert(0, Operation::Hydrate(ids));
+                // Initial render only: every later render is byte-identical
+                // to `fresh` mode.
+                w.suppress_nodes(false);
+            }),
+        }
         flush().await;
 
         // The scheduler loop's persistent park is legal because the host
@@ -344,8 +379,8 @@ macro_rules! launch {
         struct __PolyengineDioxusApp;
 
         impl $crate::bindings::Guest for __PolyengineDioxusApp {
-            async fn run() -> $crate::driver::MutationStream {
-                $crate::driver::run($root).await
+            async fn run(mode: $crate::bindings::RenderMode) -> $crate::driver::MutationStream {
+                $crate::driver::run($root, mode).await
             }
 
             async fn handle_event(

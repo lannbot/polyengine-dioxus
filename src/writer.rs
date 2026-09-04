@@ -48,6 +48,9 @@ pub struct MutationWriter {
     /// hands that capacity back here — so a steady-state batch reuses one
     /// allocation. See `driver::flush`.
     pub batch: Vec<m::Operation>,
+    /// While set, node-creating operations are dropped instead of encoded;
+    /// see [`MutationWriter::suppress_nodes`].
+    suppressed: bool,
     interner: Rc<RefCell<Interner>>,
     /// Guest-assigned template ids, keyed by the pointer identity of
     /// `template`'s `roots`/`node_paths`/`attr_paths` slices — mirroring
@@ -65,7 +68,46 @@ pub struct MutationWriter {
 impl MutationWriter {
     /// Create a writer sharing `interner` with the event-dispatch path.
     pub fn new(interner: Rc<RefCell<Interner>>) -> Self {
-        MutationWriter { batch: Vec::new(), interner, templates: FxHashMap::default() }
+        MutationWriter {
+            batch: Vec::new(),
+            suppressed: false,
+            interner,
+            templates: FxHashMap::default(),
+        }
+    }
+
+    /// Drop node-creating operations rather than encoding them, for the
+    /// initial render of `render-mode.hydrate`: the nodes already exist in
+    /// the document, and the host binds them by id through the `hydrate`
+    /// operation instead. The rebuild still runs through this writer, so
+    /// dioxus-core assigns ElementIds and fills its mount table exactly as
+    /// in `fresh` — that assignment is the entire point of the pass, and is
+    /// what dioxus-web's own note distinguishes from running with no
+    /// mutation writer at all (dioxus-web-0.7.10 src/dom.rs:45-47).
+    ///
+    /// The suppressed methods return before interning or template
+    /// registration, so a suppressed rebuild also emits no `cache-string`
+    /// and no `register-template` — except the name interning the listener
+    /// ops below do for themselves.
+    ///
+    /// DELIBERATE DIVERGENCE FROM dioxus-web, which suppresses
+    /// `create_event_listener` too and rebuilds listeners by parsing the
+    /// `,click:1` suffix of `data-node-hydration`
+    /// (dioxus-web-0.7.10 src/hydration/hydrate.rs, `write_comma_separated`).
+    /// Here listener ops flow normally and the host ignores that suffix,
+    /// because: our `new-event-listener` carries an *interned* name id,
+    /// which the marker cannot supply; the host's synthetic `mounted` event
+    /// and its observer-backed `resize`/`visible` families are driven by
+    /// listener registration and are not expressible in the marker format
+    /// at all; and `data-dioxus-id` tagging already happens host-side in
+    /// `EventDispatcher.add`. Consequently there is no `to_mount` vector
+    /// and no special `onmounted` path — see [`crate::hydrate`].
+    ///
+    /// Suppression covers the initial rebuild only; the driver clears it
+    /// before the first flush, and every later render is byte-identical to
+    /// `fresh` mode.
+    pub fn suppress_nodes(&mut self, suppressed: bool) {
+        self.suppressed = suppressed;
     }
 
     /// Intern `s`, pushing `Operation::CacheString` on first sight of this
@@ -206,19 +248,35 @@ impl MutationWriter {
 
 impl WriteMutations for MutationWriter {
     fn append_children(&mut self, id: ElementId, m: usize) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::AppendChildren(m::StackOp { id: id.0 as u32, m: m as u32 }));
     }
 
     fn assign_node_id(&mut self, path: &'static [u8], id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch
             .push(m::Operation::AssignId(m::AssignId { path: path.to_vec(), id: id.0 as u32 }));
     }
 
     fn create_placeholder(&mut self, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::CreatePlaceholder(id.0 as u32));
     }
 
     fn create_text_node(&mut self, value: &str, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::CreateTextNode(m::CreateTextNode {
             id: id.0 as u32,
             text: value.to_string(),
@@ -226,6 +284,10 @@ impl WriteMutations for MutationWriter {
     }
 
     fn load_template(&mut self, template: Template, index: usize, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         let tmpl = self.template_id(template);
         self.batch.push(m::Operation::LoadTemplate(m::LoadTemplate {
             id: id.0 as u32,
@@ -235,19 +297,35 @@ impl WriteMutations for MutationWriter {
     }
 
     fn replace_node_with(&mut self, id: ElementId, m: usize) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::ReplaceWith(m::StackOp { id: id.0 as u32, m: m as u32 }));
     }
 
     fn replace_placeholder_with_nodes(&mut self, path: &'static [u8], m: usize) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch
             .push(m::Operation::ReplacePlaceholder(m::PathOp { path: path.to_vec(), m: m as u32 }));
     }
 
     fn insert_nodes_after(&mut self, id: ElementId, m: usize) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::InsertAfter(m::StackOp { id: id.0 as u32, m: m as u32 }));
     }
 
     fn insert_nodes_before(&mut self, id: ElementId, m: usize) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::InsertBefore(m::StackOp { id: id.0 as u32, m: m as u32 }));
     }
 
@@ -258,6 +336,9 @@ impl WriteMutations for MutationWriter {
         value: &AttributeValue,
         id: ElementId,
     ) {
+        if self.suppressed {
+            return;
+        }
         // Intern first: the CacheStrings must precede the SetAttribute that
         // names their ids.
         let name_id = self.intern(name);
@@ -284,6 +365,10 @@ impl WriteMutations for MutationWriter {
     }
 
     fn set_node_text(&mut self, value: &str, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch
             .push(m::Operation::SetText(m::SetText { id: id.0 as u32, text: value.to_string() }));
     }
@@ -307,10 +392,18 @@ impl WriteMutations for MutationWriter {
     }
 
     fn remove_node(&mut self, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::Remove(id.0 as u32));
     }
 
     fn push_root(&mut self, id: ElementId) {
+        if self.suppressed {
+            return;
+        }
+
         self.batch.push(m::Operation::PushRoot(id.0 as u32));
     }
 }

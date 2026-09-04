@@ -129,9 +129,10 @@ ssr-example name:
 serve name:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -f examples/build/{{name}}.ssr.component.wasm ]; then
-      just ssr-example {{name}}
-    fi
+    # Unconditional rather than guarded on the file existing: nothing is
+    # worse than demoing a stale build, and cargo makes the up-to-date case
+    # free.
+    just ssr-example {{name}}
     wasmtime serve -S cli examples/build/{{name}}.ssr.component.wasm
 
 # Smoke-test the served component: it answers, with the golden HTML.
@@ -143,9 +144,11 @@ serve name:
 serve-test name:
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ ! -f examples/build/{{name}}.ssr.component.wasm ]; then
-      just ssr-example {{name}}
-    fi
+    # Unconditional rather than guarded on the file existing: a stale
+    # artifact from before a source change fails as a confusing golden diff
+    # rather than as "you forgot to rebuild", and cargo makes the up-to-date
+    # case free.
+    just ssr-example {{name}}
     log=$(mktemp)
     wasmtime serve -S cli --addr 127.0.0.1:0 \
       examples/build/{{name}}.ssr.component.wasm > "$log" 2>&1 &
@@ -194,6 +197,11 @@ e2e:
     if [ ! -f examples/build/todomvc.component.wasm ]; then
       just example todomvc
     fi
+    # Unconditional, unlike the component builds above: tests/hydrate.spec.ts
+    # serves examples/counter/golden.html as the page the client adopts, so a
+    # golden that has drifted from the component would fail as a hydration
+    # mismatch. This recipe re-derives and diffs it rather than trusting it.
+    just ssg-example counter
     deno run -A harness/build.ts
     cd e2e && npx playwright test
 
