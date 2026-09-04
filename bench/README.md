@@ -2,9 +2,10 @@
 
 Tracks absolute row-operation throughput on the pinned polyengine
 (`justfile`'s `POLYENGINE_REV`), Deno + linkedom (host-side DOM), a real
-Dioxus component (`examples/bench-rows`), over the stream transport (the
+Dioxus component (`examples/bench-rows`), over the mutation stream (the
 only transport — see "Transport A/B (historical)" below for why the call
-transport was retired):
+transport was retired, and "Channel A/B (historical)" below for why an
+earlier hand-rolled byte protocol was retired too). The operations are
 js-framework-benchmark-style row operations (create/append/update/swap/
 remove/clear), so there's a baseline to track regressions against and to
 eventually compare with dioxus-web's published characteristics.
@@ -128,7 +129,239 @@ run for the same reason.
   (or `FrameDecoder`) constructor hook, which is a `host/src` change —
   outside this track's territory. This is a gap for whoever owns
   `host/src` to close if the byte/batch columns are wanted later. This
-  bench therefore reports **wall-clock ms only**.
+  bench therefore reports **wall-clock ms only**. (The Channel A/B below
+  needed op *counts* and got them by patching each mounted applier's
+  `OpSink` methods in a throwaway script — enough for a one-off number,
+  still not a standing column.)
+
+## Channel A/B (historical): byte protocol vs explicit WIT schema
+
+**Retired.** `polymorph:dioxus` used to ship two mutation channels on the
+same stream transport: a hand-rolled byte encoding on `run` and an explicit
+WIT schema (`interface mutations` / `stream<operation>`) on `run-typed`.
+The A/B below is what closed that question: the owner decided to keep the
+typed channel and delete the byte one (recorded in `wit/world.wit` — `run`
+now returns `stream<operation>` directly, and there is only one export).
+This section preserves the measurement and reasoning that closed the
+question, for the record; the "byte" column below no longer exists in this
+tree.
+
+The byte format was documented normatively in `wit/world.wit`'s `run` doc
+comment: opcodes, operand widths and framing all live in prose, and the
+encoder (formerly `src/protocol.rs`) and decoder (formerly
+`host/src/decoder.ts`) were two independent hand-written implementations of
+it that could only be kept in agreement by golden vectors and review. The
+obvious maintainability alternative was to spell the vocabulary as WIT —
+records plus one `operation` variant — and ship `stream<operation>`
+instead of `stream<u8>`, letting bindgen own both sides.
+
+`wit/world.wit`'s `interface mutations` and the (then-separate) `run-typed`
+export were that alternative, built so the two could be measured against
+each other. Both channels were compiled into the same component (two
+exports); `mountApp`'s `channel` option picked one, and both fed the
+identical `DomApplier`, so the DOM work was common and the delta was purely
+encode/transport/decode. `host/tests/typed_test.ts` (since replaced by an
+absolute-assertion test, its differential reference implementation having
+been retired) asserted the two produced identical DOM for the same
+interaction sequence — without that, the numbers below would have meant
+nothing.
+
+### What the schema costs before you measure anything
+
+**WIT forbids recursive type definitions.** `register-template`'s node
+grammar is a tree, and
+
+```wit
+record template-element { children: list<template-node> }
+variant template-node  { element(template-element), ... }
+```
+
+is rejected outright: "type `template-node` depends on itself". The
+typed schema therefore carries the template as an *arena* — a flat
+`nodes` list plus `u32` indices in `roots` and `children` — which is a
+strictly weaker encoding than the byte format's self-delimiting
+recursive grammar: it admits out-of-range and cyclic index graphs that
+the byte grammar could not express, so `applyOperations` (formerly
+`applyTyped`) needs explicit validation the byte decoder never needed
+(`host/src/operations.ts`'s `rehydrateTemplateArena`). That is a real dent
+in the maintainability case, independent of speed, and it did not go away
+when the byte channel was retired — it is the cost of the schema that
+remains.
+
+The typed channel also gave up `readDirect`: polyengine's zero-copy
+direct-read session is `stream<u8>` only, so the host read with ordinary
+`read()` and paid a copy per batch. It did **not** reintroduce the
+host-retention hazard that killed the call transport (see the historical
+section below): that rule licenses quiescence on a retained end, a parked
+operation, *or* an unfinished pump (.deps/polyengine/contracts/
+embedder-api.md §"Streams and futures", issue #162), and the host holds the
+lifted readable end for the instance's lifetime, so the guest scheduler's
+persistent park was exactly as legal here as on the byte channel. No
+deadlock trap fired in any run.
+
+Third, `use mutations.{operation}` in the world makes the interface an
+import of every component built against it — including components that
+only ever called `run`. The host supplies nothing (the interface has no
+items), but the byte channel's own component type changed to add a typed
+channel it did not use — moot now that there is only one channel.
+
+### Measured
+
+Read the *ratio* column, not the absolute values. Op counts are
+**instrumented**, not estimated: a counting `OpSink` wrapped around each
+mounted applier during a one-off run recorded the `OpSink` calls in each
+timed window. Both channels produced identical counts for all seven
+operations, which is an independent check on the equivalence test.
+
+These numbers are against **polyengine 22b5d3d**, which carries the four
+optimization PRs that came out of the finding below
+([#263](https://github.com/polymorph-components/polyengine/pull/263)
+layout-node cache,
+[#264](https://github.com/polymorph-components/polyengine/pull/264)
+embedder adapter tables,
+[#265](https://github.com/polymorph-components/polyengine/pull/265)
+flatten-count memoization,
+[#270](https://github.com/polymorph-components/polyengine/pull/270)
+variant kind/value). The "before" block further down is against
+9e17dc9, which does not. The bump is in the justfile's
+`POLYENGINE_REV`, and it is the single biggest input to this table —
+do not compare rows across it.
+
+Deltas below are medians of three full runs.
+
+| op | ops in the timed window | typed − bytes | per op |
+| --- | --- | --- | --- |
+| create-10k | 90 006 | +70 ms | 0.78 µs |
+| append-1k | 9 002 | +7.0 ms | 0.77 µs |
+| create-1k | 9 006 | +6.3 ms | 0.70 µs |
+| clear | 10 002 | +1.5 ms | 0.15 µs |
+| update-every-10th | 101 | — | at the noise floor |
+| swap-rows | 4 | — | at the noise floor |
+| remove-row | 2 | — | at the noise floor |
+
+**The typed channel costs ~0.7-0.8 µs per operation** on the ops whose
+mix is dominated by multi-field records with strings, and ~0.15 µs/op on
+`clear`, which is almost entirely `remove` — a variant arm carrying a
+bare `u32`. As before, one per-op figure reproduces the whole table, and
+the ratio column is really measuring how op-heavy each operation is.
+
+The three small ops (2 to 101 operations in the window) are reported for
+completeness only. They swing by more than the effect being measured —
+`create-1k` read 0.74x in one of the three runs, i.e. the typed channel
+apparently *faster*, which is the bytes column bouncing between 9.5 and
+24.3 ms across runs, not a real result. Nothing below the op-heavy four
+rows should be read at all.
+
+### Before the runtime fix (polyengine 9e17dc9)
+
+| op | ops | typed − bytes | per op | ratio then | ratio now |
+| --- | --- | --- | --- | --- | --- |
+| create-10k | 90 006 | +437 ms | 4.9 µs | 5.80x | ~1.8x |
+| create-1k | 9 006 | +49 ms | 5.5 µs | 4.99x | ~1.6x |
+| append-1k | 9 002 | +47 ms | 5.2 µs | 1.59x | ~1.1x |
+| clear | 10 002 | +41 ms | 4.1 µs | 12.02x | ~1.4x |
+
+**Four upstream commits took the typed channel's per-operation cost down
+by 6-27x.** `clear` moved most because it was the purest measure of the
+per-op cost — nearly no DOM work to dilute it, and the cheapest possible
+variant arm paying the full type-tree walk anyway.
+
+Kept as a dated block rather than overwritten: the before/after is what
+makes either column mean anything.
+
+### On the noise floor, and this file's own guardrail
+
+The "Interpretation guardrails" section below says a >2x run-to-run
+delta on any operation is a bug lead, not a result. This table trips it
+repeatedly on the small ops and once on `create-1k`'s bytes column
+(9.51 / 12.90 / 24.32 ms across three runs, no code change). Discharging
+rather than ignoring it:
+
+- The byte channel's code is unchanged by this spike. `Interner` was
+  refactored (`intern_raw` extracted) with `intern` kept as a wrapper,
+  and `mountApp` was restructured around a `channel` option with the
+  byte branch moved verbatim under an `else`. The golden byte vectors
+  (`cargo test --test vectors`) still match.
+- The box is shared and busy; the swing is present with and without any
+  change under test.
+
+So: box noise. It also means **only the op-heavy four rows carry
+signal**, and no ratio here should be read past its first digit.
+
+### Where the remaining cost is
+
+The finding that produced the upstream fix, and what is left after it.
+Reported as
+[polyengine#261](https://github.com/polymorph-components/polyengine/issues/261).
+
+Several lift strategies run against the same guest memory at the same
+rendezvous, interleaved in one timed loop so none is measured under a
+different JIT state, each asserted element-by-element to produce the
+same values as the interpreter and the same sink calls as
+`host/src/operations.ts` (then `host/src/typed.ts`):
+
+| strategy | ns/element, 9e17dc9 | ns/element, 22b5d3d |
+| --- | --- | --- |
+| the runtime's own `load()` + `toHost` | ~4080 | ~675-963 |
+| compiled lift — closure tree per type, identical JS values | ~232 | ~231-267 |
+| compiled visitor — operands passed as arguments | ~127 | ~132-181 |
+| the byte decoder here, same sink | ~14 | ~22-31 |
+
+Upstream's caching closed most of the gap. What remains is that caching
+a walk is not the same as not walking: a **compiled lift** — walk the
+type descriptor once, build a tree of closures, and every field offset,
+`camelCase` name and variant case index becomes a constant — is still
+~3x faster than the cached interpreter, needs no `eval`, no emitted
+modules and no contract change. A **visitor-shaped read**, handing
+operands to a per-case callback instead of materialising a
+`{kind, value}` wrapper plus a payload record per element, is worth a
+further ~1.8x and would need a contract addition.
+
+Retracting a claim from an earlier revision of this section: it said the
+~0.8 µs/op that would remain after fixing the lift was guest-side
+lowering and the rendezvous, "not lift". That was a subtraction between
+two numbers measured under different conditions. Now that the lift is
+fixed, the end-to-end delta (~0.78 µs/op) and the measured lift cost
+(~0.7-0.96 µs/element) are the same size — so lift still accounts for
+essentially all of it, and the further ~3x and ~1.8x above are still on
+the table. Nobody has isolated the lowering side; that measurement has
+not been done.
+
+What does not go away is the layout: the lowered `list<operation>` is
+24 bytes/element fixed-stride with strings, paths and node lists all out
+of line, against a packed variable-length frame decoded with one
+`TextDecoder` pass over one contiguous string segment.
+
+**Disclosure.** The strategy table, the runtime-stage attribution and
+the pure-JS floor came from one-off local experiments not in this tree:
+a scratch component exercising both encodings against a counting sink,
+and a temporary hook in the gitignored `.deps/polyengine` checkout
+(reverted; that checkout is pristine). The upstream issue carries the
+detail. They are not re-derivable by running anything committed here;
+the two-column table and the instrumented op counts are.
+
+### Read
+
+At ~1.1x on `append-1k` and ~1.8x on `create-10k`, the typed channel is
+no longer obviously unaffordable — which is a different answer than this
+section gave a day ago, and the thing that changed was the runtime, not
+this repo. The cost was never the component model or the schema; it was
+one interpreter's uncached lift, and four upstream commits removed most
+of it.
+
+If the typed channel is wanted, the case for it is now mostly about the
+schema, not the speed. That case is weaker than it looks in one specific
+place: WIT forbids recursive types, so `register-template`'s tree
+becomes an index arena, which admits malformed index graphs the byte
+grammar cannot express and needs validation in `applyTyped` that the
+byte decoder never needed. The schema does not retire the
+"two implementations must agree" problem for the one op where that
+problem is hardest — it relocates it.
+
+Everywhere else, it does retire it, and 1.1-1.8x on a channel whose cost
+is already a small fraction of the DOM work is a real option rather than
+a non-starter. There is also another ~3x of headroom upstream if
+anyone wants it (above), which would take `create-10k` under ~1.3x.
 
 ## Transport A/B (historical)
 
@@ -268,21 +501,21 @@ see the numbers-are-box-relative guardrail below.)
 
 <!-- LATEST-LOCAL-NUMBERS:START -->
 
-# bench-rows results — 2026-08-31
+# bench-rows results — 2026-09-04
 
 - Deno: 2.9.5 (aarch64-unknown-linux-gnu)
-- git rev: ccc3c50
+- git rev: 813b31c-dirty
 - Box note: numbers are box-relative — compare columns within this run, not across machines. See bench/README.md.
 
 | op | ms (median of 5) |
 | --- | --- |
-| create-1k | 7.10 |
-| create-10k | 79.41 |
-| append-1k | 79.05 |
-| update-every-10th | 5.37 |
-| swap-rows | 4.99 |
-| remove-row | 2.09 |
-| clear | 3.07 |
+| create-1k | 22.15 |
+| create-10k | 192.22 |
+| append-1k | 92.77 |
+| update-every-10th | 5.39 |
+| swap-rows | 3.47 |
+| remove-row | 4.04 |
+| clear | 7.44 |
 
 <!-- LATEST-LOCAL-NUMBERS:END -->
 </content>

@@ -8,32 +8,27 @@
 // whole bench run; bench.ts renders that op as "N/A" and the failure is
 // reported plainly, not hidden.
 //
-// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName> <stream>
+// Usage: deno run --allow-read=. --allow-env --allow-run bench/bench_worker.ts <opName>
 
 import { defaultTranslator } from "@deltic/translator";
 import { loadComponentBytes, ops, runOp } from "./ops.ts";
-import type { TransportName } from "./ops.ts";
 
 async function main() {
-  const [opName, transportArg] = Deno.args;
+  const [opName] = Deno.args;
   const op = ops.find((o) => o.name === opName);
   if (!op) {
     throw new Error(`unknown op "${opName}"; known ops: ${ops.map((o) => o.name).join(", ")}`);
   }
-  if (transportArg !== "stream") {
-    throw new Error(`transport must be "stream", got "${transportArg}"`);
-  }
-  const transport: TransportName = transportArg;
 
   const translator = await defaultTranslator();
-  const bytes = await loadComponentBytes(transport);
+  const bytes = await loadComponentBytes();
   try {
-    const medianMs = await runOp(transport, bytes, translator, op);
-    console.log(JSON.stringify({ op: opName, transport, medianMs }));
+    const medianMs = await runOp(bytes, translator, op);
+    console.log(JSON.stringify({ op: opName, medianMs }));
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    console.error(`bench_worker: op=${opName} transport=${transport} failed after retries: ${message}`);
-    console.log(JSON.stringify({ op: opName, transport, medianMs: null, error: message }));
+    console.error(`bench_worker: op=${opName} failed after retries: ${message}`);
+    console.log(JSON.stringify({ op: opName, medianMs: null, error: message }));
   }
 }
 

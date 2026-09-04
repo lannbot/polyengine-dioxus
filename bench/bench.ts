@@ -5,25 +5,19 @@
 // A worker may report a null median (host-runtime trap exhausted its
 // retries — see bench/ops.ts's runOp doc); that renders as "N/A" in the
 // table rather than aborting the whole run or fabricating a number.
-//
-// Methodology and interpretation guardrails: bench/README.md. This bench
-// tracks stream-transport throughput only — the call transport was
-// retired after the historical A/B recorded in bench/README.md's
-// "Transport A/B (historical)" section.
 
-import { ops, TRANSPORTS } from "./ops.ts";
-import type { TransportName } from "./ops.ts";
+import { ops } from "./ops.ts";
 
 interface OpResult {
   op: string;
   medianMs: number | null;
-  error?: string;
+  error: string | undefined;
 }
 
-async function runWorker(opName: string, transport: TransportName): Promise<{ medianMs: number | null; error?: string }> {
+async function runWorker(opName: string): Promise<{ medianMs: number | null; error?: string }> {
   const workerPath = new URL("./bench_worker.ts", import.meta.url).pathname;
   const cmd = new Deno.Command(Deno.execPath(), {
-    args: ["run", "--allow-read=.", "--allow-env", "--allow-run", workerPath, opName, transport],
+    args: ["run", "--allow-read=.", "--allow-env", "--allow-run", workerPath, opName],
     cwd: new URL("..", import.meta.url).pathname,
     stdout: "piped",
     stderr: "piped",
@@ -32,22 +26,21 @@ async function runWorker(opName: string, transport: TransportName): Promise<{ me
   const stdoutText = new TextDecoder().decode(stdout);
   if (code !== 0) {
     const stderrText = new TextDecoder().decode(stderr);
-    throw new Error(`bench_worker failed for op=${opName} transport=${transport} (exit ${code}):\n${stderrText}`);
+    throw new Error(`bench_worker failed for op=${opName} (exit ${code}):\n${stderrText}`);
   }
   // The worker's only stdout line is its JSON result; be tolerant of any
   // stray output by taking the last non-empty line.
   const lines = stdoutText.trim().split("\n").filter((l) => l.length > 0);
   const last = lines[lines.length - 1];
-  const parsed = JSON.parse(last) as { op: string; transport: string; medianMs: number | null; error?: string };
+  const parsed = JSON.parse(last) as { op: string; medianMs: number | null; error?: string };
   return { medianMs: parsed.medianMs, error: parsed.error };
 }
 
 async function benchAll(): Promise<OpResult[]> {
   const results: OpResult[] = [];
-  const transport = TRANSPORTS[0];
   for (const op of ops) {
-    const { medianMs, error } = await runWorker(op.name, transport);
-    results.push({ op: op.name, medianMs, error });
+    const r = await runWorker(op.name);
+    results.push({ op: op.name, medianMs: r.medianMs, error: r.error });
   }
   return results;
 }
@@ -67,8 +60,12 @@ function renderTable(results: OpResult[]): string {
 }
 
 async function gitRev(): Promise<string> {
+  // `git describe --always --dirty` rather than `rev-parse --short HEAD`:
+  // this tree may be uncommitted, so a bare HEAD rev could claim a stale
+  // commit — the `--dirty` suffix makes that visible instead of silently
+  // misleading.
   try {
-    const cmd = new Deno.Command("git", { args: ["rev-parse", "--short", "HEAD"], stdout: "piped" });
+    const cmd = new Deno.Command("git", { args: ["describe", "--always", "--dirty"], stdout: "piped" });
     const { stdout } = await cmd.output();
     return new TextDecoder().decode(stdout).trim() || "unknown";
   } catch {

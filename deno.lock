@@ -132,11 +132,11 @@
       "npm:linkedom@0.18.12"
     ],
     "links": {
-      "jsr:@polyengine/ct-runner@0.5.2": {},
-      "jsr:@polyengine/protocol@0.2.3": {},
-      "jsr:@polyengine/runtime@0.5.2": {},
-      "jsr:@polyengine/translator@0.5.2": {},
-      "jsr:@polyengine/wasi@0.5.2": {}
+      "jsr:@polyengine/ct-runner@0.6.3": {},
+      "jsr:@polyengine/protocol@0.3.1": {},
+      "jsr:@polyengine/runtime@0.6.3": {},
+      "jsr:@polyengine/translator@0.6.3": {},
+      "jsr:@polyengine/wasi@0.6.3": {}
     }
   }
 }

@@ -1,19 +1,18 @@
 /// polymorph:dioxus — a batched DOM-mutation surface for Dioxus apps running
 /// as components on polyengine.
 ///
-/// Design: the guest queues DOM mutations into a compact byte format
-/// (sledgehammer-bindgen-shaped) and delivers whole batches across the
-/// boundary; the host decodes with a tight switch loop and applies them to a
-/// live DOM subtree. Strings cross the boundary two ways: `&'static` names
-/// (tags, attribute names, event names) are interned once and referenced by
-/// u16 id thereafter; dynamic text is concatenated per batch and decoded with
-/// a single TextDecoder pass.
+/// Design: the guest queues DOM mutations as `mutations.operation` values and
+/// delivers whole batches across the boundary in one stream write; the host
+/// applies them to a live DOM subtree. Strings cross the boundary two ways:
+/// `&'static` names (tags, attribute names, event names) are interned once
+/// and referenced by u16 id thereafter (`cache-string`); dynamic text rides
+/// in the operations themselves.
 ///
-/// The wire format below is normative and versions with this WIT package:
-/// any change to opcodes, operand layouts, or framing bumps the package
-/// version (instantiation is digest-checked, so a mismatch fails loudly and
-/// early).
-package polymorph:dioxus@0.4.0;
+/// The `mutations` interface is the normative schema and versions with this
+/// WIT package: any change to the operation vocabulary or its record shapes
+/// bumps the package version (instantiation is digest-checked, so a mismatch
+/// fails loudly and early).
+package polymorph:dioxus@0.5.0;
 
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
@@ -296,6 +295,145 @@ interface events {
   }
 }
 
+/// The mutation protocol: the op vocabulary the guest renders through,
+/// spelled as WIT records and one `operation` variant, delivered as
+/// `stream<operation>` by the world's `run` export. This interface is
+/// normative — there is no other encoding of a mutation.
+///
+/// The vocabulary mirrors dioxus-core 0.7's `WriteMutations` trait plus two
+/// protocol ops (`cache-string`, `register-template`). Element ids are
+/// Dioxus ElementIds (slab indices, dense; id 0 is the mount root — the
+/// host-designated element the app renders into), `m` is the "top m nodes of
+/// the stack" count, `path` is a list of child indices, and stack semantics
+/// are Dioxus's mutation-stack semantics, identical to its own web
+/// interpreter. `bubbles` on the listener ops is dioxus-html's
+/// `event_bubbles` verdict, looked up guest-side: the host delegates
+/// bubbling events at the mount root and attaches non-bubbling listeners per
+/// element, so it needs the same bit on removal to find the registration.
+///
+/// Interning: a `str-ref` is an id defined by a prior `cache-string`
+/// operation, in this batch or any earlier one, and the guest emits each
+/// definition exactly once per instance. Event names cross back on
+/// `handle-event` as the same interned u16, so steady-state event dispatch
+/// transfers no string data at all.
+///
+/// **`register-template` carries an arena, not a tree.** The natural shape
+/// is recursive — `record template-element { children: list<template-node> }`
+/// — and WIT forbids it: recursive type definitions are rejected outright
+/// (`wasm-tools`: "type `template-node` depends on itself"). So `nodes` is a
+/// flat pre-order list, `roots` and every element's `children` are `u32`
+/// indices into it, and the host rebuilds the tree by indexing. The arena
+/// therefore admits malformed index graphs — out-of-range or cyclic indices —
+/// that a recursive shape could not express, and the host must validate them
+/// rather than trust them.
+
+interface mutations {
+  /// An interned string id, defined by a prior `cache-string` operation.
+  type str-ref = u16;
+  /// A Dioxus ElementId (slab index; dense). 0 is the mount root.
+  type element-id = u32;
+
+  /// Define (or overwrite) interned slot `id`. Ids are guest-managed and
+  /// assigned monotonically from 0.
+  record cache-string { id: str-ref, str: string }
+
+  /// One *static* template attribute. Dynamic template attributes are not
+  /// part of the template; they arrive later as `set-attribute`.
+  record template-attr { name: str-ref, ns: option<str-ref>, value: string }
+
+  /// `children` are indices into the enclosing `register-template`'s
+  /// `nodes` arena — see the interface doc for why this is not a tree.
+  record template-element {
+    tag: str-ref,
+    ns: option<str-ref>,
+    attrs: list<template-attr>,
+    children: list<u32>,
+  }
+
+  variant template-node {
+    element(template-element),
+    text(string),
+    /// A runtime-supplied node slot; the host materializes a placeholder
+    /// that later ops (`assign-id` / `replace-placeholder`) address by path.
+    dynamic,
+  }
+
+  /// Register a static template, which the host materializes once
+  /// (detached) so `load-template` can clone root subtrees from it. Each
+  /// distinct template is sent once, before its first use.
+  ///
+  /// `nodes` is the arena; `roots` indexes into it.
+  record register-template {
+    id: u16,
+    nodes: list<template-node>,
+    roots: list<u32>,
+  }
+
+  /// An element id plus a stack count ("top m nodes").
+  record stack-op { id: element-id, m: u32 }
+  /// A template path plus a stack count.
+  record path-op { path: list<u8>, m: u32 }
+  record assign-id { path: list<u8>, id: element-id }
+  record create-text-node { id: element-id, text: string }
+  record load-template { id: element-id, tmpl: u16, root: u16 }
+  record set-text { id: element-id, text: string }
+
+  /// An attribute's new value. `none` removes the attribute
+  /// unconditionally — it is not an empty text value.
+  variant attr-value {
+    text(string),
+    float(f64),
+    int(s64),
+    boolean(bool),
+    none,
+  }
+
+  /// Set (or, with `value: none`, remove) one attribute on a live element.
+  ///
+  /// The host applies Dioxus's attribute semantics: value/checked/selected
+  /// as properties, the style namespace via the style object,
+  /// dangerous_inner_html, and boolean-attribute removal on false.
+  ///
+  /// `none` routes via removeAttribute/removeAttributeNS/
+  /// style.removeProperty as the name and namespace dictate; the
+  /// boolean-attribute truthiness table governs only text/bool VALUES.
+  /// Property-backed fields get the same reset the truthy-value path uses
+  /// instead of a bare removeAttribute, since removeAttribute alone does not
+  /// clear a live element's property: value -> "" (+ removeAttribute),
+  /// checked -> false, selected -> false, dangerous_inner_html -> innerHTML
+  /// = "". (Ported from dioxus v0.7.10's `remove_attribute` sledgehammer op
+  /// in packages/interpreter/src/unified_bindings.rs.)
+  record set-attribute {
+    id: element-id,
+    name: str-ref,
+    ns: option<str-ref>,
+    value: attr-value,
+  }
+
+  record event-listener { id: element-id, name: str-ref, bubbles: bool }
+
+  /// One mutation. Arms whose only operand is an element id carry it bare.
+  variant operation {
+    cache-string(cache-string),
+    register-template(register-template),
+    append-children(stack-op),
+    assign-id(assign-id),
+    create-placeholder(element-id),
+    create-text-node(create-text-node),
+    load-template(load-template),
+    replace-with(stack-op),
+    replace-placeholder(path-op),
+    insert-after(stack-op),
+    insert-before(stack-op),
+    set-attribute(set-attribute),
+    set-text(set-text),
+    new-event-listener(event-listener),
+    remove-event-listener(event-listener),
+    remove(element-id),
+    push-root(element-id),
+  }
+}
+
 /// Operations on live elements the guest cannot express declaratively.
 ///
 /// Everything else in this world flows one way: the guest describes DOM
@@ -379,151 +517,48 @@ interface dom {
 /// dispatches DOM events via `handle-event`.
 world app {
   use events.{payload, dom-event};
+  use mutations.{operation};
 
   import events;
   import dom;
 
   /// Start the app and return the mutation channel: the host receives the
-  /// read end, parks a direct-read session on it for the life of the
-  /// instance (polyengine amendment A21 `readDirect` — the decode callback
-  /// runs synchronously inside the guest's `stream.write` rendezvous over a
-  /// view aliasing guest linear memory; zero copies), and applies decoded
-  /// batches to the mount root. The app's scheduler keeps running after the
-  /// return as a spawned task: initial mount (rebuild → one batch), then
-  /// re-renders forever. That task's persistent park between renders (a
-  /// plain Rust future woken cross-task, no WIT waitable) is legal because
-  /// the host's parked direct-read session is amendment-A15 host retention,
-  /// making a quiescent instance the documented embedder-may-act state — and
-  /// it also means app failure surfaces on the channel the host actually
-  /// watches: a trap rejects the parked session (`PeerTrappedError`).
+  /// read end, reads batches of `operation`s from it for the life of the
+  /// instance, and applies them to the mount root. The app's scheduler keeps
+  /// running after the return as a spawned task: initial mount (rebuild →
+  /// one batch), then re-renders forever. One batch is one stream write of
+  /// the whole `list<operation>`.
   ///
   /// Returning the stream (rather than passing it to a host import) makes
   /// the channel's lifecycle structural: it exists iff the app started,
-  /// exactly once, tied to this instance.
+  /// exactly once, tied to this instance. It also means nothing may be
+  /// written before the reader is returned — such a write would park while
+  /// the host is still awaiting `run`'s promise for the reader it needs in
+  /// order to read — and that the scheduler cannot live in this export's own
+  /// body, since an async export's body returning is task.return followed by
+  /// task exit.
   ///
-  /// # Batch layout
-  ///
-  /// A batch has two segments:
-  ///
-  /// - **string segment**: UTF-8 bytes, the concatenation of every dynamic
-  ///   string operand (`dynstr` below) in op order. Decoded host-side in one
-  ///   pass (`TextDecoder("utf-8", { ignoreBOM: true })` — BOM stripping must
-  ///   be disabled or a leading U+FEFF in the first string would misalign
-  ///   slicing), then sliced per-operand by UTF-16 code-unit lengths carried
-  ///   in the op segment.
-  /// - **op segment**: opcodes and operands, little-endian, unaligned.
-  ///
-  /// # Framing
-  ///
-  /// ```text
-  /// frame     := frame-len:u32 strings-len:u32 strings:u8{strings-len} ops:u8{rest}
-  /// frame-len  = byte length of everything after the frame-len field
-  ///            = 4 + strings-len + len(ops)
-  /// ```
-  ///
-  /// Frames arrive back-to-back; a delivery may contain several frames or a
-  /// partial one (stream writers chunk internally). The decoder consumes
-  /// only whole frames from a direct-read view and leaves a partial tail
-  /// unread (redelivered at the next rendezvous); if it cannot consume at
-  /// least one byte it stages the partial tail instead (a direct-read
-  /// callback must not acknowledge zero bytes and keep the session parked).
-  ///
-  /// # Primitive operand encodings
-  ///
-  /// ```text
-  /// u8/u16/u32/s64/f64 : little-endian, unaligned
-  /// id     : u32   — Dioxus ElementId (slab index; dense). id 0 is the mount
-  ///                  root: the host-designated element the app renders into.
-  /// m      : u32   — "top m nodes of the stack" count
-  /// tmpl   : u16   — guest-assigned template id
-  /// path   : u8 length, then that many u8 child indices
-  /// strref : u16   — interned string id, defined by a prior cache-string op
-  ///                  (in this or any earlier batch). The value 0xffff is a
-  ///                  "none" sentinel admitted ONLY by namespace operands
-  ///                  (every `ns:strref` below, including template element and
-  ///                  template attribute namespaces); tag/name operands are
-  ///                  mandatory ids and never carry the sentinel.
-  /// dynstr : u16 UTF-16 code-unit length, then (iff 0xffff) u32 actual
-  ///          length. Content is the next `length` code units of the decoded
-  ///          string segment, consumed sequentially. The encoder appends the
-  ///          string's UTF-8 bytes to the string segment and writes its
-  ///          UTF-16 code-unit count here (Rust: sum of char::len_utf16,
-  ///          with an all-ASCII fast path where it equals the byte length).
-  /// ```
-  ///
-  /// # Opcodes
-  ///
-  /// The vocabulary mirrors dioxus-core 0.7's `WriteMutations` trait plus
-  /// two protocol ops (cache-string, register-template). Stack semantics
-  /// ("push", "top m nodes") are Dioxus's mutation-stack semantics,
-  /// identical to its own web interpreter.
-  ///
-  /// ```text
-  /// 0x01 cache-string        id:u16 s:dynstr
-  ///        Define (or overwrite) interned slot `id`. Slots are guest-managed;
-  ///        ids are assigned monotonically from 0 in practice.
-  /// 0x02 register-template   tmpl:u16 nroots:u16 root:node{nroots}
-  ///        node := kind:u8 ...
-  ///          0x00 element  tag:strref ns:strref nattrs:u16
-  ///                        attr{nattrs} := name:strref ns:strref value:dynstr
-  ///                        nchildren:u16 node{nchildren}
-  ///          0x01 text     value:dynstr
-  ///          0x02 dynamic  (placeholder for a runtime-supplied node)
-  ///        Registers a static template; the host materializes it once
-  ///        (detached) and later load-template clones root subtrees from it.
-  ///        Guest sends each distinct template once, before its first use
-  ///        (templates are 'static with unique identity, keyed guest-side by
-  ///        pointer).
-  /// 0x03 append-children     id m
-  /// 0x04 assign-id           path id
-  /// 0x05 create-placeholder  id
-  /// 0x06 create-text-node    id text:dynstr
-  /// 0x07 load-template       tmpl root-index:u16 id
-  /// 0x08 replace-with        id m
-  /// 0x09 replace-placeholder path m
-  /// 0x0a insert-after        id m
-  /// 0x0b insert-before       id m
-  /// 0x0c set-attribute       id name:strref ns:strref value:attrval
-  ///        attrval := kind:u8 ...
-  ///          0x00 text   s:dynstr
-  ///          0x01 float  f64
-  ///          0x02 int    s64
-  ///          0x03 bool   u8
-  ///          0x04 none   (remove the attribute unconditionally — routed via
-  ///                       removeAttribute/removeAttributeNS/style.removeProperty
-  ///                       as the name/namespace dictates; the boolean-attribute
-  ///                       truthiness table governs only text/bool VALUES.
-  ///                       Property-backed fields get the same reset the
-  ///                       truthy-value path uses instead of a bare
-  ///                       removeAttribute, since removeAttribute alone does not
-  ///                       clear a live element's property: value -> "" (+
-  ///                       removeAttribute), checked -> false, selected ->
-  ///                       false, dangerous_inner_html -> innerHTML = "".
-  ///                       Ported from dioxus v0.7.10's `remove_attribute`
-  ///                       sledgehammer op in
-  ///                       packages/interpreter/src/unified_bindings.rs.)
-  ///        The host applies Dioxus's attribute semantics (value/checked/
-  ///        selected as properties, style namespace via style object,
-  ///        dangerous_inner_html, boolean attribute removal on false).
-  /// 0x0d set-text            id text:dynstr
-  /// 0x0e new-event-listener  id name:strref flags:u8
-  /// 0x0f remove-event-listener id name:strref flags:u8
-  ///        flags bit0 = the event bubbles (dioxus-html's event_bubbles table,
-  ///        looked up guest-side): the host delegates bubbling events at the
-  ///        mount root and attaches non-bubbling listeners per element, so it
-  ///        needs the same bit on removal to find the registration. Bits 1..7
-  ///        reserved, must be 0.
-  /// 0x10 remove              id
-  /// 0x11 push-root           id
-  /// ```
-  ///
-  /// Event names cross back on `handle-event` as the same interned u16, so
-  /// steady-state event dispatch transfers no string data at all.
+  /// The scheduler task's persistent park between renders (a plain Rust
+  /// future woken cross-task, no WIT waitable) is legal because the host
+  /// retains the lifted readable end of this stream for the instance's
+  /// lifetime. Under polyengine's retention rule — issue #162,
+  /// `.deps/polyengine/contracts/embedder-api.md` §"Streams and futures",
+  /// "while the host retains a way to act on a stream/future — a retained
+  /// end, a parked host operation, or an unfinished producer pump — a
+  /// stalled guest is reported as the documented embedder-may-act hang,
+  /// never a deadlock trap" — a retained end alone suffices; the host need
+  /// not also have a read parked. That is exactly what the runtime
+  /// implements: `HostActivity`
+  /// (`.deps/polyengine/runtime/src/exec/host_streams.ts`) arms on the
+  /// retained end and disarms only when that end is lowered back into a
+  /// guest. So a quiescent instance is the documented embedder-may-act
+  /// state, and app failure still surfaces on the channel the host watches:
+  /// a trap rejects the host's pending read (`PeerTrappedError`).
   ///
   /// (Historical: earlier revisions passed this stream to a host import
   /// `surface.open`, alongside a since-retired synchronous call transport —
   /// see bench/README.md for the retirement record.)
-  export run: async func() -> stream<u8>;
+  export run: async func() -> stream<operation>;
 
   /// Dispatch one DOM event to the listener registered on `target` (the
   /// ElementId carried by new-event-listener) for the interned event name

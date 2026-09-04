@@ -6,7 +6,12 @@
 # A21, so we build against a pinned upstream rev instead.
 
 POLYENGINE_REPO := "https://github.com/polymorph-components/polyengine.git"
-POLYENGINE_REV := "9e17dc97dd3e"
+# Advanced 9e17dc97dd3e -> 22b5d3d for polyengine#261's optimization PRs
+# (#263 layout-node cache, #264 embedder adapter tables, #265 flatten-count
+# memoization, #270 variant kind/value): the typed mutation channel's cost is
+# almost entirely that lift path, so the Channel A/B in bench/README.md is
+# only meaningful against a runtime that has them.
+POLYENGINE_REV := "22b5d3d"
 TAILWIND_VERSION := "v4.3.3"
 
 default: check test
@@ -76,12 +81,6 @@ example name:
       .deps/polyengine/tools/translate/main.ts \
       examples/build/{{name}}.component.wasm \
       -o examples/build/{{name}}.plan.json
-
-# Regenerate golden vectors (runs the Rust generator, then verifies the TS
-# decoder agrees).
-vectors:
-    cargo test --test vectors -- --ignored generate
-    deno task test
 
 # Real-browser (Chromium via Playwright) E2E lane for the counter example.
 # First run: `cd e2e && npm install && npx playwright install chromium --with-deps`.

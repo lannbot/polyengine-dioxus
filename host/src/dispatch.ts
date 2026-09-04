@@ -15,16 +15,16 @@
 //
 //   2. A scheduler-driven mutation flush. When the guest re-renders off its
 //      own timer/async work — no `handle-event` in flight at all — the
-//      mutation frames arrive through the stream's direct-read `consume`
-//      callback, and DOM application happens synchronously INSIDE that
-//      callback, i.e. inside the guest's stream-write rendezvous. A live
-//      guest activation is on the stack: the instance's reentrance bracket
-//      is turn-scoped, taken around every thread resumption and released
-//      only when the thread parks (.deps/polyengine/runtime/src/task/
-//      thread.ts `resumeWith`, and exec/boundary.ts's matching bracket). So
-//      a native event fired by the mutation itself would enter the guest
-//      from inside a live turn — the same trap, with nothing "in flight"
-//      by the window-1 bookkeeping.
+//      mutation batch arrives through the mutation stream's read loop
+//      (host.ts's `await ops.read()` resumption), and DOM application
+//      happens synchronously INSIDE that resumption, i.e. inside the
+//      guest's stream-write rendezvous. A live guest activation is on the
+//      stack: the instance's reentrance bracket is turn-scoped, taken
+//      around every thread resumption and released only when the thread
+//      parks (.deps/polyengine/runtime/src/task/thread.ts `resumeWith`, and
+//      exec/boundary.ts's matching bracket). So a native event fired by the
+//      mutation itself would enter the guest from inside a live turn — the
+//      same trap, with nothing "in flight" by the window-1 bookkeeping.
 //
 //   3. A host IMPORT invoked by the guest. `dom.set-focus` (wit/world.wit,
 //      `interface dom`) runs host code while the guest that called it is
@@ -36,15 +36,12 @@
 //      brackets its body with `beginApply`/`endApply`, so dispatches raised
 //      by the focus change queue and drain once the guest's turn unwinds.
 //
-// Window 2 is also forbidden outright by contract, independently of the
-// trap: .deps/polyengine/contracts/embedder-api.md amendment A21 ("Streams
-// and futures", direct-read scoping) — "Inside the callback, calls that can
-// run guest code or operate this stream are forbidden (reentrancy)". A21
-// gives a second, memory-safety reason: the `DirectSource` view aliases
-// guest linear memory, and views are re-derived only per `remaining()` call
-// ("a `memory.grow` **between** rendezvous never yields a stale view" —
-// within one rendezvous there is no re-derivation). Guest code run
-// mid-callback could `memory.grow` and detach the buffer under the decoder.
+// Window 2 also risks a memory-safety hazard if guest code were run inside
+// it: `applyOperations` reads lifted values already copied out of guest
+// linear memory by the embedder's lift step (contracts/embedder-api.md
+// "Value mapping"), so unlike a raw-bytes direct-read view there is no
+// aliasing hazard here — but running guest code mid-application would still
+// reenter the instance, which is what the gate exists to prevent.
 //
 // Why deferring to a microtask is sound: microtasks run only when the JS
 // stack is empty, and a guest turn holds the stack until it parks or
@@ -65,7 +62,7 @@
 /**
  * Serializes guest entries so that at most one is live and none is attempted
  * inside a forbidden window (see the module comment: in-flight call,
- * mutation application inside the direct-read callback, or a host import
+ * mutation application inside the read loop's resumption, or a host import
  * running inside the calling guest's turn).
  *
  * Pure logic — no DOM, no runtime imports — so the ordering rules can be
@@ -77,7 +74,7 @@ export class DispatchGate {
   /** A guest `handle-event` call is in flight (its promise is unsettled). */
   #busy = false;
   /** Inside a host-code window that runs within a live guest turn: the
-   * direct-read `consume` callback (mutation application), or the body of
+   * mutation read loop's chunk-application window (host.ts's `beginApply`/`endApply` around applyOperations), or the body of
    * a host import the guest called. */
   #applying = false;
   #disposed = false;
@@ -97,7 +94,7 @@ export class DispatchGate {
   /** Leave the mutation-application window and drain what it collected.
    *
    * The drain is deferred with `queueMicrotask` rather than run inline:
-   * `endApply` is called from the `finally` inside the direct-read callback,
+   * `endApply` is called from the `finally` inside the read loop's chunk-application window,
    * which is still on the guest's rendezvous stack — the instance is not
    * enterable until that turn unwinds. An empty JS stack is the observable
    * proxy for "no live guest turn" (module comment). The same holds for a

@@ -23,8 +23,8 @@
 //!
 //! # Why `run` returns immediately and spawns the scheduler
 //!
-//! `run` is `async func() -> stream<u8>`: the host awaits its promise to
-//! obtain the read end, then parks a `readDirect` session on it. Under the
+//! `run` is `async func() -> stream<operation>`: the host awaits its promise
+//! to obtain the read end, then reads batches from it. Under the
 //! component-model async ABI, an async export's Rust body *returning* is
 //! task.return followed by task exit — so the scheduler cannot live in
 //! `run`'s own body. Instead `run` creates the stream, stashes the writer
@@ -34,15 +34,30 @@
 //!
 //! Ordering is safe by rendezvous: the spawned task's first `write` parks
 //! until the host actually reads, so nothing is lost if it runs before the
-//! host has its session parked. The converse would deadlock, which is why
-//! `run`'s own body must not write anything before returning the reader —
-//! that write would park while the host is still awaiting `run`'s promise
-//! for the reader it needs in order to read.
+//! host is reading. The converse would deadlock, which is why `run`'s own
+//! body must not write anything before returning the reader — that write
+//! would park while the host is still awaiting `run`'s promise for the
+//! reader it needs in order to read.
 //!
 //! All driver state (`RENDERER`/`RUNTIME`/`INTERNER`/`VDOM`) is installed
 //! before `run` returns, so a `handle-event` arriving immediately after the
 //! return finds consistent state. It cannot find a listener yet (no batch
 //! has been applied), but it will not observe an uninitialized cell.
+//!
+//! # Why the scheduler may park forever
+//!
+//! The scheduler task's wait between renders is a plain Rust future woken
+//! cross-task, with no WIT waitable pending — a state the runtime would
+//! otherwise be entitled to call a deadlock. It is legal because the host
+//! retains the readable end of the mutation stream for the instance's
+//! lifetime, and polyengine's retention rule (#162,
+//! `.deps/polyengine/contracts/embedder-api.md` §"Streams and futures")
+//! makes "a retained end, a parked host operation, or an unfinished producer
+//! pump" each sufficient on its own: a stalled guest is then reported as the
+//! documented embedder-may-act hang, never a deadlock trap. The runtime's
+//! `HostActivity` (`.deps/polyengine/runtime/src/exec/host_streams.ts`) arms
+//! on that retained end and disarms only when the end is lowered back into a
+//! guest, which never happens here.
 //!
 //! # How failure surfaces
 //!
@@ -50,9 +65,9 @@
 //! `run`'s promise never settled, so a mount-time failure had nowhere to go
 //! but that held-open promise.) Now `run`'s promise settles as soon as the
 //! reader is handed back, and a trap in the spawned scheduler task surfaces
-//! as a rejection of the host's parked direct-read session
-//! (`PeerTrappedError`) — the channel the host actually watches. A trap
-//! during `run`'s own body rejects the host's `await exports.run()`.
+//! as a rejection of the host's pending read (`PeerTrappedError`) — the
+//! channel the host actually watches. A trap during `run`'s own body rejects
+//! the host's `await exports.run()`.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -66,15 +81,16 @@ use dioxus_html::PlatformEventData;
 use wit_bindgen::rt::async_support::{spawn_local, StreamReader, StreamWriter};
 
 use crate::bindings::polymorph::dioxus::events::Payload;
+use crate::bindings::polymorph::dioxus::mutations::Operation;
 use crate::bindings::{wit_stream, DomEvent};
 use crate::events::{WitEventConverter, WitEventData};
-use crate::protocol::Interner;
+use crate::interner::Interner;
 use crate::writer::MutationWriter;
 
 /// The read end of the mutation channel: what `run` hands back to the host.
 /// Named here so [`crate::launch!`] can spell the export's return type
 /// without the app crate naming wit-bindgen's runtime module.
-pub type MutationStream = StreamReader<u8>;
+pub type MutationStream = StreamReader<Operation>;
 
 /// Everything the flush path needs, shared by the `run` loop and by
 /// `handle-event`.
@@ -83,15 +99,15 @@ struct Renderer {
     /// Taken for the duration of a write so a second flusher can detect an
     /// in-flight write instead of panicking on a re-entrant `RefCell`
     /// borrow.
-    stream: Option<StreamWriter<u8>>,
-    /// Frame bytes staged while another task owns `stream`. The in-flight
-    /// flusher drains this before giving the writer back, which keeps frames
-    /// in batch order.
-    pending: Vec<u8>,
-    /// Reused frame scratch buffer (`Batch::take_frame` appends).
-    scratch: Vec<u8>,
-    /// Set once the host has dropped the read end of the stream transport
-    /// (see the reader-gone branch in [`flush`]). Once dead, `flush` drops
+    stream: Option<StreamWriter<Operation>>,
+    /// Operations staged while another task owns `stream`, drained by the
+    /// in-flight flusher before it hands the writer back — keeping batches
+    /// in order. (Batch boundaries are not preserved across staging; the
+    /// host applies operations in order and does not depend on where a
+    /// write ends.)
+    pending: Vec<Operation>,
+    /// Set once the host has dropped the read end of the stream (see the
+    /// reader-gone branch in [`flush`]). Once dead, `flush` drops
     /// staged/incoming batches instead of accumulating them in `pending`:
     /// this is only reachable at host teardown, when there is no longer a
     /// reader to receive anything, so bounded memory beats a slow leak from
@@ -110,19 +126,18 @@ thread_local! {
     static INTERNER: RefCell<Option<Rc<RefCell<Interner>>>> = const { RefCell::new(None) };
 }
 
-/// Stage the current batch (if non-empty) and push it to the host.
+/// Push the current batch (if non-empty) to the host: one batch is one
+/// stream write of the whole `Vec<Operation>`.
 ///
-/// Appends one frame and writes it. `StreamWriter::write_all` returns the
-/// values it could *not* write, which happens only once the read end is
-/// gone; there is no short-write case to retry because `write_all` already
-/// loops. When the host's direct-read session is parked the whole write
-/// completes inline, so this await normally does not yield.
+/// `StreamWriter::write_all` returns the values it could *not* write, which
+/// happens only once the read end is gone; there is no short-write case to
+/// retry because `write_all` already loops.
 async fn flush() {
     enum Action {
         Nothing,
-        Stream(StreamWriter<u8>, Vec<u8>),
-        /// Another task owns the stream writer; our frame was staged and will
-        /// be drained by that task in order.
+        Stream(StreamWriter<Operation>, Vec<Operation>),
+        /// Another task owns the stream writer; our operations were staged
+        /// and will be drained by that task in order.
         Staged,
     }
 
@@ -132,18 +147,19 @@ async fn flush() {
             return Action::Nothing;
         }
         if r.dead {
-            // The reader is gone; discard this batch instead of staging it
-            // into `pending` (which would otherwise grow unboundedly across
-            // every future flush once the host has torn down its read end).
+            // The reader is gone; discard rather than growing `pending`
+            // unboundedly across every future flush.
             r.writer.batch.clear();
             return Action::Nothing;
         }
-        r.scratch.clear();
-        r.writer.batch.take_frame(&mut r.scratch);
+        // `mem::take` rather than `clear`: the operations are moved into the
+        // write, so the batch leaves with them. Its capacity comes back
+        // through `write_all`'s return value and is recycled below.
+        let batch = std::mem::take(&mut r.writer.batch);
         match r.stream.take() {
-            Some(w) => Action::Stream(w, std::mem::take(&mut r.scratch)),
+            Some(w) => Action::Stream(w, batch),
             None => {
-                r.pending.extend_from_slice(&r.scratch);
+                r.pending.extend(batch);
                 Action::Staged
             }
         }
@@ -151,20 +167,20 @@ async fn flush() {
 
     match action {
         Action::Nothing | Action::Staged => {}
-        Action::Stream(mut w, mut bytes) => {
+        Action::Stream(mut w, mut ops) => {
             loop {
                 // `write_all` loops internally over partial writes and gives
                 // back whatever it could not deliver; a non-empty remainder
                 // means the read end is gone, not a short write to retry.
-                let leftover = w.write_all(bytes).await;
+                let leftover = w.write_all(ops).await;
                 if !leftover.is_empty() {
                     // The host dropped the read end: the mutation channel is
                     // gone and there is nothing useful left to do with this
-                    // writer.
-                    // Mark the renderer dead and drop whatever was staged so
-                    // far — only reachable at host teardown, and bounded
-                    // memory beats a slow leak from `pending` growing on
-                    // every subsequent flush with no reader left to drain it.
+                    // writer. Mark the renderer dead and drop whatever was
+                    // staged so far — only reachable at host teardown, and
+                    // bounded memory beats a slow leak from `pending`
+                    // growing on every subsequent flush with no reader left
+                    // to drain it.
                     RENDERER.with_borrow_mut(|r| {
                         let r = r.as_mut().unwrap();
                         r.dead = true;
@@ -172,22 +188,32 @@ async fn flush() {
                     });
                     return;
                 }
-                // Anything another task staged while we were awaiting goes out
-                // now, before the writer becomes available again — otherwise
-                // frames would leave the guest out of batch order.
+                // Anything another task staged while we were awaiting goes
+                // out now, before the writer becomes available again —
+                // otherwise operations would leave the guest out of order.
                 let staged = RENDERER.with_borrow_mut(|r| {
                     let r = r.as_mut().unwrap();
-                    // `leftover` is the drained buffer; hand its capacity back
-                    // to the scratch slot so steady-state flushing does not
-                    // reallocate.
-                    r.scratch = leftover;
+                    // `leftover` is the drained batch: an empty `Vec` that
+                    // kept its capacity. Hand that capacity back to the
+                    // writer so steady-state flushing does not regrow the
+                    // batch from zero (a batch is tens of thousands of
+                    // operations at bench sizes, so dropping the capacity
+                    // would cost a dozen reallocations per batch).
+                    //
+                    // Only when the writer has not already started filling
+                    // the next batch: another task may have rendered into it
+                    // while we were awaiting, and that batch must not be
+                    // clobbered.
+                    if r.writer.batch.is_empty() {
+                        r.writer.batch = leftover;
+                    }
                     std::mem::take(&mut r.pending)
                 });
                 if staged.is_empty() {
                     RENDERER.with_borrow_mut(|r| r.as_mut().unwrap().stream = Some(w));
                     return;
                 }
-                bytes = staged;
+                ops = staged;
             }
         }
     }
@@ -202,6 +228,18 @@ fn wait_for_work() -> impl Future<Output = ()> {
             let fut = dom.wait_for_work();
             let mut fut = std::pin::pin!(fut);
             Pin::new(&mut fut).poll(cx)
+        })
+    })
+}
+
+/// Run one render step with both thread-locals borrowed, and nothing awaited
+/// in between.
+fn render(step: impl FnOnce(&mut VirtualDom, &mut MutationWriter)) {
+    VDOM.with_borrow_mut(|dom| {
+        RENDERER.with_borrow_mut(|r| {
+            let dom = dom.as_mut().expect("driver: vdom not initialized");
+            let r = r.as_mut().expect("driver: renderer not initialized");
+            step(dom, &mut r.writer);
         })
     })
 }
@@ -232,7 +270,6 @@ pub async fn run(root: fn() -> Element) -> MutationStream {
         writer: MutationWriter::new(interner),
         stream: Some(writer),
         pending: Vec::new(),
-        scratch: Vec::new(),
         dead: false,
     }));
 
@@ -240,11 +277,8 @@ pub async fn run(root: fn() -> Element) -> MutationStream {
         render(|dom, w| dom.rebuild(w));
         flush().await;
 
-        // The persistent scheduler loop's park (`wait_for_work`: a plain Rust
-        // future woken cross-task, no WIT waitable) is legal because the host
-        // retains a parked direct-read session on our ops stream — amendment
-        // A15 host retention, so a quiescent instance is the documented
-        // embedder-may-act state.
+        // The scheduler loop's persistent park is legal because the host
+        // retains the readable end of this stream — see the module doc.
         loop {
             wait_for_work().await;
             render(|dom, w| dom.render_immediate(w));
@@ -253,18 +287,6 @@ pub async fn run(root: fn() -> Element) -> MutationStream {
     });
 
     reader
-}
-
-/// Run one render step with both thread-locals borrowed, and nothing awaited
-/// in between.
-fn render(step: impl FnOnce(&mut VirtualDom, &mut MutationWriter)) {
-    VDOM.with_borrow_mut(|dom| {
-        RENDERER.with_borrow_mut(|r| {
-            let dom = dom.as_mut().expect("driver: vdom not initialized");
-            let r = r.as_mut().expect("driver: renderer not initialized");
-            step(dom, &mut r.writer);
-        })
-    })
 }
 
 /// Implementation of the world's `handle-event` export.

@@ -1,21 +1,22 @@
 // Host runtime wiring for polymorph:dioxus — instantiation, the stream
-// mutation transport, and DOM event dispatch back into the guest.
+// mutation channel, and DOM event dispatch back into the guest.
 //
 // Governing docs: wit/world.wit (world `app`, interface `events`), and
 // .deps/polyengine/contracts/embedder-api.md ("Module wiring and
-// instantiation", "Resources", "Streams and futures" amendment A21, "Value
-// mapping"). Cited inline as `contract:<section>`.
+// instantiation", "Resources", "Streams and futures", "Value mapping").
+// Cited inline as `contract:<section>`.
 
 import { instantiate } from "@deltic/runtime/embedder";
 import { wasi } from "@polyengine/wasi";
 import type { InstantiateSource } from "@deltic/runtime/embedder";
-import type { DirectSource, Stream } from "@deltic/protocol";
+import type { Stream } from "@deltic/protocol";
 
 import { DomApplier } from "./applier.ts";
 import { DispatchGate } from "./dispatch.ts";
-import { FrameDecoder } from "./decoder.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
+import { applyOperations } from "./operations.ts";
+import type { Operation } from "./operations.ts";
 
 export interface MountOptions {
   /** Component artifacts in either form `instantiate` accepts: a
@@ -28,10 +29,10 @@ export interface MountOptions {
   source: InstantiateSource;
   root: Element;
   /** Asynchronous failure after a successful mount: the mutation stream's
-   * parked direct-read session rejecting (guest trap — `PeerTrappedError` —
-   * or teardown), or a `handle-event` call rejecting. A failure during mount
-   * itself is NOT routed here: `await exports.run()` rejects and `mountApp`
-   * throws it to the caller. */
+   * read loop rejecting (guest trap — `PeerTrappedError` — or teardown), or
+   * a `handle-event` call rejecting. A failure during mount itself is NOT
+   * routed here: `await exports.run()` rejects and `mountApp` throws it to
+   * the caller. */
   onError?: (err: unknown) => void;
 }
 
@@ -46,16 +47,12 @@ export interface Mounted {
   /** Exposed for tests: the event dispatcher wired as the applier's
    * ListenerDelegate. */
   dispatcher: EventDispatcher;
-  /** Exposed for tests: the stream-transport frame decoder. Lets a
-   * test confirm the zero-copy direct-read path actually engaged —
-   * `pending()` returns 0 once every delivered byte has been decoded into
-   * whole frames, with no heavier instrumentation needed. */
-  frameDecoder: FrameDecoder;
   /** Dispatch a native-event-like value at `targetEl` for `name`, exactly
    * as a real DOM listener would (used by fullstack tests and by real
    * event listeners alike). */
   dispatch(targetEl: Element | null, name: string, ev: NativeEventLike): void;
 }
+
 
 /**
  * A host-implemented resource class for `events.dom-event`
@@ -303,9 +300,9 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
  * `ListenerDelegate`), instantiates the component with the `events`/`dom`
  * imports wired per contracts/embedder-api.md "Module wiring and
  * instantiation" (imports keyed by the verbatim interface id), awaits
- * `run()` for the mutation stream's read end, and parks a direct-read
- * session on it for the life of the instance. Returns a handle for
- * dispatching DOM events and (best-effort) tearing down.
+ * `run()` for the mutation stream's read end, and starts a read loop over
+ * it for the life of the instance. Returns a handle for dispatching DOM
+ * events and (best-effort) tearing down.
  *
  * Because the read end now comes back as `run`'s return value rather than
  * through a host import, a mount-time guest trap rejects THIS await and is
@@ -318,7 +315,6 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     dispatchEvent(elementId, nameId, name, ev);
   });
   const applier = new DomApplier(opts.root, dispatcher);
-  const frameDecoder = new FrameDecoder(applier);
 
   let disposed = false;
   const onError = opts.onError ?? (() => {});
@@ -351,16 +347,15 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   //
   // (2) While mutations are being APPLIED, with no `handle-event` in flight
   //     at all. A scheduler-driven flush (guest timer/async re-render)
-  //     delivers frames through the mutation stream's direct-read `consume`
-  //     callback below, and DOM application runs synchronously inside it —
-  //     i.e. inside the guest's stream-write rendezvous, with a live guest
-  //     turn on the stack (the reentrance bracket is turn-scoped: taken
-  //     around every thread resumption, released when the thread parks —
+  //     delivers a batch through the mutation read loop below, and DOM
+  //     application (`applyOperations`) runs synchronously inside that
+  //     loop's `await ... read()` resumption — i.e. inside the guest's
+  //     stream-write rendezvous, with a live guest turn on the stack (the
+  //     reentrance bracket is turn-scoped: taken around every thread
+  //     resumption, released when the thread parks —
   //     .deps/polyengine/runtime/src/task/thread.ts). A native event fired
   //     by the mutation itself would enter the guest straight out of the
-  //     rendezvous. That is forbidden outright by embedder-api.md amendment
-  //     A21 ("Inside the callback, calls that can run guest code or operate
-  //     this stream are forbidden (reentrancy)") as well as trapping.
+  //     rendezvous — forbidden outright, trap or not.
   //
   // Fix: serialize entries into the guest through `DispatchGate` (see
   // ./dispatch.ts for the full rationale, including why a microtask-
@@ -389,78 +384,81 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     ...wasi(),
     // Keyed by the verbatim interface id (contract:"Module wiring and
     // instantiation"), so the version tracks the WIT package version —
-    // now 0.4.0. `events`' sole host-implemented item is the `dom-event`
+    // now 0.5.0. `events`' sole host-implemented item is the `dom-event`
     // resource, named by its bindgen-emitted UpperCamel name
     // (contract:"Resources"); `dom`'s items are functions, named by their
     // bindgen-emitted lowerCamel names.
-    "polymorph:dioxus/events@0.4.0": { DomEvent },
-    "polymorph:dioxus/dom@0.4.0": createDomImports(applier, gate),
+    "polymorph:dioxus/events@0.5.0": { DomEvent },
+    "polymorph:dioxus/dom@0.5.0": createDomImports(applier, gate),
   };
 
   const instance = await instantiate(opts.source, imports);
 
   handleEventExport = instance.exports.handleEvent as (...a: unknown[]) => unknown;
 
-  // `run` starts the app and returns the mutation channel's read end; its
+  // `run` starts the app and returns the mutation stream's read end; the
   // promise settles as soon as the guest hands the reader back (the app's
   // scheduler keeps running as a spawned guest task). A trap before the
   // return rejects here and propagates out of `mountApp`.
-  const ops = await (instance.exports.run as () => Promise<Stream<Uint8Array>>)();
+  const ops = await (instance.exports.run as () => Promise<Stream<Operation>>)();
 
-  // Park a direct-read session for the instance's lifetime. We always consume
-  // the FULL view per rendezvous — whole frames decoded+applied, any partial
-  // tail staged in the FrameDecoder — so `readDirect`'s "never acknowledge
-  // zero bytes" hazard (embedder-api.md amendment A21) never arises:
-  // `markRead` always receives `view.length`, never 0.
-  const consume = (src: DirectSource): "more" | "done" => {
-    const view = src.remaining();
-    // The callback runs DOM application only (decodeBatch via the
-    // FrameDecoder) — no direct guest call. But DOM application can fire
-    // synchronous NATIVE events (detaching a focused element fires
-    // `focusout`), whose listeners would dispatch into the guest from
-    // inside this rendezvous. The gate enforces the A21 rule ("calls that
-    // can run guest code ... are forbidden" inside a direct-read callback)
-    // transitively: dispatches raised in this window are queued and drained
-    // by a microtask, once the rendezvous' guest turn has unwound.
-    gate.beginApply();
-    try {
-      const n = frameDecoder.feed(view);
-      if (n < view.length) {
-        frameDecoder.stashRest(view, n);
+  // The guest scheduler's persistent park between renders needs SOME
+  // host-side reason the store's deadlock verdict stays suppressed.
+  // wit/world.wit's `run` doc, citing .deps/polyengine/contracts/
+  // embedder-api.md §"Streams and futures", issue #162
+  // ("Deadlock-verdict suppression tracks host retention"): suppression
+  // holds "while the host retains a way to act on a stream/future — a
+  // retained end, a parked host operation, or an unfinished producer pump".
+  // That rule is disjunctive, and what applies here is the first disjunct,
+  // not the second: `mountApp` holds the lifted readable end (`ops`) for
+  // the instance's whole lifetime — never lowered back into the guest —
+  // which is retention-by-itself, independent of whether a `read()` happens
+  // to be in flight at any given instant. (Runtime-side, this is
+  // `HostActivity` arming on the retained end and disarming only on a
+  // lower-back-to-guest — .deps/polyengine/runtime/src/exec/
+  // host_streams.ts.) So there being a brief gap with no read outstanding
+  // (the await resumption between one `read()`'s chunk landing and
+  // `applyOperations` finishing, before the next `read()` is issued) is not
+  // itself a hazard: retention already covers it.
+  //
+  // The next read is still issued immediately after applying a chunk, with
+  // no unnecessary work in between — good practice for latency, not a
+  // correctness requirement.
+  //
+  // MAX_READ must be large enough that a whole batch (up to ~40k operations
+  // for the 10k-row bench case) arrives in one chunk.
+  const MAX_READ = 1 << 22;
+  (async () => {
+    while (!disposed) {
+      const chunk = await ops.read(MAX_READ);
+      if (chunk.length === 0) break; // end of stream
+      gate.beginApply();
+      try {
+        applyOperations(chunk, applier);
+      } finally {
+        gate.endApply();
       }
-    } finally {
-      gate.endApply();
     }
-    src.markRead(view.length);
-    return "more";
-  };
-  // The session only settles on stream end/drop/fault, which for a healthy
-  // long-lived app never happens in normal operation. Route a rejection (peer
-  // trap, teardown) to onError rather than letting it become unhandled.
-  ops.readDirect(consume).catch((err: unknown) => {
+  })().catch((err: unknown) => {
     if (!disposed) onError(err);
   });
 
   const mounted: Mounted = {
     applier,
     dispatcher,
-    frameDecoder,
     dispatch(targetEl, name, ev) {
       dispatcher.dispatchTo(targetEl, name, ev);
     },
     dispose() {
       // Per-STREAM disposal is the documented release path: `Stream<T>`
       // exposes `drop()` (.deps/polyengine/protocol/src/handles.ts:68-82,
-      // "`[Symbol.dispose]` alias"), and embedder-api.md amendment A21
-      // makes reader-drop the designed teardown handshake — "reader/writer
-      // drop resolves the session with its total ... a resolution the
-      // producer's own `done` did not cause is the reader-gone signal".
-      // So dropping the read end RESOLVES the parked direct-read session
-      // (a resolution, not a rejection — `onError` stays silent, and the
-      // `!disposed` guard on the catch is belt-and-braces), and the guest
-      // observes reader-gone on its next write (its driver detects leftover
-      // bytes from `write_all`, sets its `dead` flag, and discards further
-      // batches with bounded memory — src/driver.rs), so it goes dark.
+      // "`[Symbol.dispose]` alias"), and dropping the read end resolves the
+      // read loop's next `read()` with `done` (a resolution, not a
+      // rejection — `onError` stays silent, and the `!disposed` guard on
+      // the catch is belt-and-braces), and the guest observes reader-gone
+      // on its next write (its driver detects leftover bytes from
+      // `write_all`, sets its `dead` flag, and discards further batches
+      // with bounded memory — src/driver.rs), so it goes dark.
       //
       // Instance-level disposal still does not exist in the embedder API
       // (`EmbedderInstance` is `{ exports, handle, imports }`), so the

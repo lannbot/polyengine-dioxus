@@ -5,13 +5,21 @@
 # means on a workstation. New gates belong in the justfile, not here; this
 # file only supplies a machine to run them on.
 #
-# Why the build steps below are not optional: the two component-loading
-# suites (host/tests/counter_test.ts, host/tests/fullstack_test.ts) THROW
-# when their .wasm is missing rather than skipping it, so dropping a build
-# step turns the suite red rather than quietly green. The one silent-skip
-# in the suite is host/tests/decoder_test.ts's "golden vectors pending",
-# which fires only if vectors/ is empty — it is committed, so the
-# cross-language check against the Rust encoder always runs.
+# Why the build steps below are not optional: the component-loading suites
+# (host/tests/counter_test.ts, host/tests/fullstack_test.ts,
+# host/tests/operations_test.ts) THROW when their .wasm is missing rather
+# than skipping it, so dropping a build step turns the suite red rather
+# than quietly green.
+#
+# There is no longer a cross-language golden-vector gate to run. It existed
+# because the mutation wire format was implemented twice by hand (a Rust
+# encoder and a TypeScript decoder) and nothing but those vectors held the
+# two in agreement. The format is now an explicit WIT schema
+# (`interface mutations`) with bindgen owning both sides, so the vectors,
+# their generator and the TypeScript decoder are all deleted. What replaces
+# them as the end-to-end net is host/tests/operations_test.ts, which asserts
+# literal DOM output from a real mounted component — hence the counter build
+# step below being load-bearing rather than a nicety.
 #
 # Everything is version-pinned, matching how the rest of the repo pins
 # (POLYENGINE_REV in the justfile, `=0.7.10` dioxus, `=0.60.0`
@@ -89,6 +97,7 @@ jobs:
       - name: Build counter example component
         run: just example counter
 
-      # cargo test (incl. the golden-vector encoder check) + deno task test
-      # (incl. the same vectors against the TypeScript decoder).
+      # cargo test (the interner unit tests; the writer names the generated
+      # bindings and so is wasm32-only, covered host-side instead) +
+      # deno task test.
       - run: just test

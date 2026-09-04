@@ -583,7 +583,7 @@ function isObserverName(name: string): name is ObserverName {
 interface Registration {
   bubbles: boolean;
   /** The interned string id this listener was registered with
-   * (decoder.ts's StrRef) — wit/world.wit: "Event names cross back on
+   * (applier.ts's StrRef) — wit/world.wit: "Event names cross back on
    * handle-event as the same interned u16", so dispatch hands this same
    * id back rather than re-deriving it from the applier's string table
    * (applier.ts is consumed unchanged; this keeps the mapping local). */
@@ -661,8 +661,9 @@ export class EventDispatcher implements ListenerDelegate {
     // `mounted` likewise finds nothing and is harmless.
     //
     // Timing: `add()` is called during batch application, i.e. inside the
-    // DispatchGate's apply window (host.ts's direct-read `consume` brackets
-    // it with beginApply/endApply). The gate therefore QUEUES this
+    // DispatchGate's apply window (host.ts's mutation read loop brackets
+    // each chunk's `applyOperations` call with beginApply/endApply). The
+    // gate therefore QUEUES this
     // dispatch and drains it in a microtask after `endApply` — which is
     // exactly the contract's requirement that `mounted` fire after the
     // batch that created the element has been fully applied, with the node

@@ -13,8 +13,8 @@ mkdir -p bench/build
 echo "== building bench-rows =="
 cargo build -p bench-rows-example --target wasm32-wasip2 --release
 cp target/wasm32-wasip2/release/bench_rows_example.wasm \
-  bench/build/bench-rows-stream.component.wasm
-wasm-tools validate --features component-model,cm-async bench/build/bench-rows-stream.component.wasm
+  bench/build/bench-rows.component.wasm
+wasm-tools validate --features component-model,cm-async bench/build/bench-rows.component.wasm
 
 echo "== running bench.ts =="
 deno run --allow-read=. --allow-write=bench --allow-env --allow-run bench/bench.ts "$@"

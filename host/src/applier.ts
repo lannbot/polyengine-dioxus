@@ -1,4 +1,5 @@
-// DOM applier for the polymorph:dioxus mutation wire format.
+// DOM applier for the polymorph:dioxus mutation schema (wit/world.wit's
+// `interface mutations`, applied via operations.ts's `applyOperations`).
 //
 // DOM semantics (stack machine, node table, template cloning, path walking,
 // setAttributeInner rules) are ported from dioxus-web's own interpreter
@@ -6,11 +7,55 @@
 // https://github.com/DioxusLabs/dioxus, `packages/web/src/js/core.ts` and
 // `packages/interpreter/src/set_attribute.ts`, vendored here for reference
 // as /tmp/opencode/dioxus-ref/{core,set_attribute}.ts at authoring time).
-// The BYTE FORMAT is ours (see decoder.ts / wit/world.wit); only the DOM
-// application rules are ported. Cited inline as `ref:core.ts:<line>` /
-// `ref:set_attribute.ts:<line>`.
+// The MUTATION SCHEMA is ours (wit/world.wit's `interface mutations`); only
+// the DOM application rules are ported. Cited inline as `ref:core.ts:<line>`
+// / `ref:set_attribute.ts:<line>`.
 
-import type { OpSink, StrRef, TemplateNodeDesc } from "./decoder.ts";
+/** An interned string id (wit/world.wit `mutations.str-ref`, a u16),
+ * defined by a prior `cache-string` operation. */
+export type StrRef = number;
+
+/** The recursive tree `operations.ts`'s `rehydrateTemplateArena` builds out
+ * of a `register-template` operation's flat arena, for `OpSink.
+ * registerTemplate` to consume. */
+export type TemplateNodeDesc =
+  | {
+      kind: "element";
+      tag: StrRef;
+      ns: StrRef | null;
+      attrs: { name: StrRef; ns: StrRef | null; value: string }[];
+      children: TemplateNodeDesc[];
+    }
+  | { kind: "text"; value: string }
+  | { kind: "dynamic" };
+
+/** The sink `operations.ts`'s `applyOperations` drives — one method per
+ * `mutations.operation` arm (wit/world.wit), `register-template`'s arena
+ * already rehydrated into a `TemplateNodeDesc` tree. `DomApplier` is the
+ * only implementor. */
+export interface OpSink {
+  cacheString(id: number, s: string): void;
+  registerTemplate(tmpl: number, roots: TemplateNodeDesc[]): void;
+  appendChildren(id: number, m: number): void;
+  assignId(path: Uint8Array, id: number): void;
+  createPlaceholder(id: number): void;
+  createTextNode(id: number, text: string): void;
+  loadTemplate(tmpl: number, root: number, id: number): void;
+  replaceWith(id: number, m: number): void;
+  replacePlaceholder(path: Uint8Array, m: number): void;
+  insertAfter(id: number, m: number): void;
+  insertBefore(id: number, m: number): void;
+  setAttributeText(id: number, name: StrRef, ns: StrRef | null, value: string): void;
+  setAttributeFloat(id: number, name: StrRef, ns: StrRef | null, value: number): void;
+  setAttributeInt(id: number, name: StrRef, ns: StrRef | null, value: bigint): void;
+  setAttributeBool(id: number, name: StrRef, ns: StrRef | null, value: boolean): void;
+  setAttributeNone(id: number, name: StrRef, ns: StrRef | null): void;
+  setText(id: number, text: string): void;
+  newEventListener(id: number, name: StrRef, bubbles: boolean): void;
+  removeEventListener(id: number, name: StrRef, bubbles: boolean): void;
+  remove(id: number): void;
+  pushRoot(id: number): void;
+}
 
 export interface ListenerDelegate {
   add(
