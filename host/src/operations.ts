@@ -108,7 +108,8 @@ export type Operation =
   | { kind: "new-event-listener"; value: EventListenerLifted }
   | { kind: "remove-event-listener"; value: EventListenerLifted }
   | { kind: "remove"; value: number }
-  | { kind: "push-root"; value: number };
+  | { kind: "push-root"; value: number }
+  | { kind: "hydrate"; value: number[] };
 
 /**
  * Rehydrate a `register-template` arena (`nodes` flat pre-order list,
@@ -253,6 +254,9 @@ export function applyOperations(ops: Operation[], sink: OpSink): void {
         break;
       case "push-root":
         sink.pushRoot(op.value);
+        break;
+      case "hydrate":
+        sink.hydrate(op.value);
         break;
       default: {
         const _exhaustive: never = op;

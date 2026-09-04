@@ -36,6 +36,9 @@ dioxus = { version = "=0.7.10", default-features = false, features = [
   "signals",
   "hooks",
 ] }
+# `pre_render`'s hydration markers are the order `src/hydrate.rs` must
+# reproduce; tests/hydration_order.rs checks the two against each other.
+dioxus-ssr = "=0.7.9"
 
 [workspace]
 members = [".", "ssr", "fixtures/surface-probe", "examples/counter", "examples/bench-rows", "examples/todomvc", "examples/components", "examples/primitives"]

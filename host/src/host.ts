@@ -28,10 +28,20 @@ export interface MountOptions {
    * verbatim to `instantiate`. */
   source: InstantiateSource;
   root: Element;
+  /** Request `render-mode.hydrate` instead of the default `render-mode.
+   * fresh` (wit/world.wit world `app`'s `render-mode` variant). Setting
+   * this is an assertion by the caller that `root` already holds this
+   * exact component's markup, prerendered at its initial state by
+   * `dioxus-ssr`'s `pre_render` — hydration is positional, not compared
+   * against the vdom, so a mismatch (wrong component, wrong initial
+   * state, edited markup) is a build-skew bug, and the host reports it as
+   * a thrown Error (`DomApplier.hydrate`) rather than silently repairing
+   * or falling back to a fresh render. Defaults to `false` (fresh). */
+  hydrate?: boolean;
   /** Asynchronous failure after a successful mount: the mutation stream's
    * read loop rejecting (guest trap — `PeerTrappedError` — or teardown), or
    * a `handle-event` call rejecting. A failure during mount itself is NOT
-   * routed here: `await exports.run()` rejects and `mountApp` throws it to
+   * routed here: `await exports.run(mode)` rejects and `mountApp` throws it to
    * the caller. */
   onError?: (err: unknown) => void;
 }
@@ -384,12 +394,12 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     ...wasi(),
     // Keyed by the verbatim interface id (contract:"Module wiring and
     // instantiation"), so the version tracks the WIT package version —
-    // now 0.5.0. `events`' sole host-implemented item is the `dom-event`
+    // now 0.6.0. `events`' sole host-implemented item is the `dom-event`
     // resource, named by its bindgen-emitted UpperCamel name
     // (contract:"Resources"); `dom`'s items are functions, named by their
     // bindgen-emitted lowerCamel names.
-    "polymorph:dioxus/events@0.5.0": { DomEvent },
-    "polymorph:dioxus/dom@0.5.0": createDomImports(applier, gate),
+    "polymorph:dioxus/events@0.6.0": { DomEvent },
+    "polymorph:dioxus/dom@0.6.0": createDomImports(applier, gate),
   };
 
   const instance = await instantiate(opts.source, imports);
@@ -400,7 +410,13 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   // promise settles as soon as the guest hands the reader back (the app's
   // scheduler keeps running as a spawned guest task). A trap before the
   // return rejects here and propagates out of `mountApp`.
-  const ops = await (instance.exports.run as () => Promise<Stream<Operation>>)();
+  //
+  // `render-mode` is a payload-less variant, so it lowers as `{ kind:
+  // "fresh" }` / `{ kind: "hydrate" }` — same shape as the existing
+  // `{ kind: "none" }` / `{ kind: "dynamic" }` arms in operations.ts
+  // (contract:"Value mapping").
+  const mode = { kind: opts.hydrate ? "hydrate" : "fresh" };
+  const ops = await (instance.exports.run as (m: unknown) => Promise<Stream<Operation>>)(mode);
 
   // The guest scheduler's persistent park between renders needs SOME
   // host-side reason the store's deadlock verdict stays suppressed.

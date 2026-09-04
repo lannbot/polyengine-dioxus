@@ -55,6 +55,7 @@ export interface OpSink {
   removeEventListener(id: number, name: StrRef, bubbles: boolean): void;
   remove(id: number): void;
   pushRoot(id: number): void;
+  hydrate(ids: number[]): void;
 }
 
 export interface ListenerDelegate {
@@ -115,6 +116,13 @@ const BOOL_ATTRS = new Set([
 function truthy(val: string | boolean): boolean {
   return val === "true" || val === true;
 }
+
+// The exact comment markers `dioxus-ssr`'s `pre_render` writes for a dynamic
+// text and a placeholder (dioxus-ssr-0.7.9 src/renderer.rs:189,215). Anchored
+// so an unrelated comment cannot be misread as a marker.
+const TEXT_MARKER = /^node-id(\d+)$/;
+const PLACEHOLDER_MARKER = /^placeholder(\d+)$/;
+const COMMENT_NODE = 8;
 
 export class DomApplier implements OpSink {
   #doc: Document;
@@ -518,5 +526,135 @@ export class DomApplier implements OpSink {
   pushRoot(id: number): void {
     // ref:core.ts:173-175 pushRoot
     this.#stack.push(this.#getNode(id));
+  }
+
+  // -- hydration ------------------------------------------------------------
+  //
+  // ref:core.ts:204-291 hydrate_node/hydrate, ported with three deliberate
+  // divergences (see wit/world.wit's `hydrate` type doc, which is normative
+  // for the first two):
+  //  1. the element marker's `,click:1,...` suffix is IGNORED here — no
+  //     listener is attached and no `data-dioxus-id` is set; listener
+  //     registrations arrive as ordinary `new-event-listener` ops later in
+  //     the same batch (the only form carrying the interned name id
+  //     `ListenerDelegate` needs), so `EventDispatcher.add` sets
+  //     `data-dioxus-id` when that op arrives, same as on a fresh mount.
+  //  2. every index is validated (wit/world.wit's hydrate doc: "the host
+  //     reports it rather than binding a wrong node") instead of upstream's
+  //     unchecked `ids[parseInt(...)]`.
+  //  3. upstream's TreeWalker loop is contorted because it mutates the DOM
+  //     (removing marker comments, inserting text nodes) WHILE walking.
+  //     Since each marker carries its own index, visit order cannot affect
+  //     correctness here, so we collect every comment node first (a single
+  //     non-mutating walk) and process the collected list after — much
+  //     simpler than threading `continueToNextNode`/`nextSibling` bookkeeping
+  //     through a concurrent mutation.
+  hydrate(ids: number[]): void {
+    const root = this.#nodes[0] as Element;
+    // Which of ids[0..ids.length) has been matched by a marker so far, so
+    // "unmatched" and "duplicate" can both be detected after the walk.
+    const matched = new Uint8Array(ids.length);
+
+    const checkIndex = (n: number, source: string): void => {
+      if (!Number.isInteger(n) || n < 0 || n >= ids.length) {
+        throw new Error(
+          `DomApplier.hydrate: marker index ${n} (${source}) is out of range for ${ids.length} id(s)`,
+        );
+      }
+      if (matched[n] !== 0) {
+        throw new Error(`DomApplier.hydrate: marker index ${n} (${source}) is duplicated`);
+      }
+      matched[n] = 1;
+    };
+
+    // -- element markers: data-node-hydration="n[,event:bubbles]..." -------
+    // ref:core.ts:225-232 hydrate's `under instanceof HTMLElement` branch,
+    // minus the querySelectorAll/self split (querySelectorAll doesn't match
+    // the root itself, so upstream checks it separately; a single selector
+    // rooted one level up isn't available to us either, so keep that split).
+    const elementMarkers: Element[] = [];
+    if (root.hasAttribute("data-node-hydration")) elementMarkers.push(root);
+    for (const el of Array.from(root.querySelectorAll("[data-node-hydration]"))) {
+      elementMarkers.push(el);
+    }
+    for (const el of elementMarkers) {
+      const marker = el.getAttribute("data-node-hydration")!;
+      // ref:core.ts:206-207 — only the leading index; the rest (listener
+      // suffix) is divergence (1) above, deliberately unread.
+      const n = parseInt(marker.split(",")[0], 10);
+      checkIndex(n, `element marker "${marker}"`);
+      this.#setNode(ids[n], el);
+    }
+
+    // -- comment markers: <!--node-idN-->text<!--#--> / <!--placeholderN--> -
+    // 0x80 is NodeFilter.SHOW_COMMENT's numeric value. `NodeFilter` itself
+    // is a DOM global linkedom does not define (createTreeWalker works
+    // against comments there, only the NodeFilter object is missing) — the
+    // mask is spec-stable (DOM Standard §NodeFilter), so passing it
+    // literally works identically under linkedom and a real browser.
+    const SHOW_COMMENT = 0x80;
+    const walker = this.#doc.createTreeWalker(root, SHOW_COMMENT);
+    const comments: Comment[] = [];
+    let cur = walker.nextNode();
+    while (cur) {
+      comments.push(cur as unknown as Comment);
+      cur = walker.nextNode();
+    }
+
+    for (const comment of comments) {
+      const text = comment.textContent ?? "";
+      // Anchored, unlike upstream's `text.split("placeholder")` /
+      // `text.split("node-id")`: those match the marker word ANYWHERE in a
+      // comment, so an unrelated comment in the served markup would be read
+      // as a marker. Since we then validate indices, that misread would
+      // surface as a spurious duplicate/out-of-range error rather than
+      // upstream's silent misbinding — a strictly worse failure, so match
+      // the exact forms `pre_render` writes instead
+      // (dioxus-ssr-0.7.9 src/renderer.rs:189,215).
+      const placeholder = PLACEHOLDER_MARKER.exec(text);
+      if (placeholder) {
+        const n = parseInt(placeholder[1], 10);
+        checkIndex(n, `placeholder marker "${text}"`);
+        this.#setNode(ids[n], comment);
+        continue;
+      }
+      const textMarker = TEXT_MARKER.exec(text);
+      if (textMarker) {
+        const n = parseInt(textMarker[1], 10);
+        checkIndex(n, `text marker "${text}"`);
+        // ref:core.ts:281-291 — an empty dynamic text serializes as two
+        // adjacent comments with no text node between them; create one for
+        // the id to bind to. Otherwise the next sibling is the real text.
+        const next = comment.nextSibling;
+        let textNode: Node;
+        if (next !== null && next.nodeType === COMMENT_NODE) {
+          textNode = this.#doc.createTextNode("");
+          comment.parentNode!.insertBefore(textNode, next);
+        } else {
+          textNode = next as Node;
+        }
+        this.#setNode(ids[n], textNode);
+        // Consume the closing `<!--#-->` too (ref:core.ts's
+        // `commentAfterText.remove()`); it carries no index of its own.
+        // Checked rather than assumed: `pre_render` always closes a dynamic
+        // text, so its absence means the markup is not what this component
+        // rendered, and removing whatever happened to follow would corrupt
+        // the document on the way to a later error.
+        const closing = textNode.nextSibling;
+        if (closing === null || closing.nodeType !== COMMENT_NODE || closing.textContent !== "#") {
+          throw new Error(
+            `DomApplier.hydrate: text marker "${text}" is not closed by <!--#-->`,
+          );
+        }
+        closing.parentNode?.removeChild(closing);
+        comment.parentNode?.removeChild(comment);
+      }
+    }
+
+    for (let n = 0; n < ids.length; n++) {
+      if (matched[n] === 0) {
+        throw new Error(`DomApplier.hydrate: marker index ${n} was never matched by any marker`);
+      }
+    }
   }
 }

@@ -273,7 +273,10 @@ thread_local! {
 struct Component;
 
 impl Guest for Component {
-    async fn run() -> wit_bindgen::rt::async_support::StreamReader<Operation> {
+    // The mode is ignored: this probe builds a fixed op sequence with no
+    // Dioxus behind it, so it has no `pre-render`ed markup to adopt and
+    // nothing that could differ between `fresh` and `hydrate`.
+    async fn run(_mode: RenderMode) -> wit_bindgen::rt::async_support::StreamReader<Operation> {
         // Create the channel and hand the read end back as `run`'s return
         // value (wit: `export run: async func() -> stream<operation>`).
         // Nothing is written from this body: a write here would park waiting

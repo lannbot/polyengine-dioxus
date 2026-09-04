@@ -12,7 +12,7 @@
 /// WIT package: any change to the operation vocabulary or its record shapes
 /// bumps the package version (instantiation is digest-checked, so a mismatch
 /// fails loudly and early).
-package polymorph:dioxus@0.5.0;
+package polymorph:dioxus@0.6.0;
 
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
@@ -412,6 +412,36 @@ interface mutations {
 
   record event-listener { id: element-id, name: str-ref, bubbles: bool }
 
+  /// Adopt server-rendered HTML: bind already-present DOM nodes to the
+  /// element ids the guest just assigned, instead of creating nodes.
+  ///
+  /// The payload is the guest's traversal of its own template tree, in the
+  /// order `dioxus-ssr`'s `pre-render` numbered the markers it wrote into
+  /// the HTML: `ids[n]` is the element id for hydration marker `n`. Neither
+  /// side compares HTML against the vdom — the correspondence is positional,
+  /// and both orders come from the same template walk.
+  ///
+  /// The host finds marker `n` by walking the mount root: elements carry
+  /// `data-node-hydration="n[,event:bubbles]..."`, dynamic text is bracketed
+  /// by `<!--node-id n-->text<!--#-->` and a placeholder is `<!--placeholder
+  /// n-->`. The marker comments are consumed (removed) by the walk, and an
+  /// empty dynamic text gets a real text node inserted for the id to bind
+  /// to. The listener suffix of the element marker is IGNORED here: listener
+  /// registrations arrive as ordinary `new-event-listener` operations later
+  /// in the same batch, which is the only form that carries the interned
+  /// name id, and is what lets `mounted` and the observer-backed families
+  /// work exactly as they do on a fresh mount.
+  ///
+  /// Every index in 0..len(ids) must be matched by exactly one marker. A
+  /// missing, duplicated or out-of-range marker means the served HTML and
+  /// the running component disagree — a build skew, not a recoverable
+  /// condition — and the host reports it rather than binding a wrong node.
+  ///
+  /// Valid only as the first operation of the first batch, and only when
+  /// `run` was called with `render-mode.hydrate`; in that mode the guest
+  /// emits no node-creating operations for the initial render at all.
+  type hydrate = list<element-id>;
+
   /// One mutation. Arms whose only operand is an element id carry it bare.
   variant operation {
     cache-string(cache-string),
@@ -431,6 +461,7 @@ interface mutations {
     remove-event-listener(event-listener),
     remove(element-id),
     push-root(element-id),
+    hydrate(hydrate),
   }
 }
 
@@ -522,6 +553,27 @@ world app {
   import events;
   import dom;
 
+  /// How the app's initial render meets the mount root.
+  variant render-mode {
+    /// The mount root is empty (or its contents are to be discarded): the
+    /// guest builds the tree from nothing and the host applies the creating
+    /// operations.
+    fresh,
+    /// The mount root already contains this same component's markup,
+    /// prerendered by `dioxus-ssr`'s `pre-render`. The guest still runs the
+    /// initial render — element ids are assigned exactly as in `fresh` —
+    /// but emits no node-creating operations for it. Instead the first
+    /// batch opens with a `hydrate` operation binding those ids to the
+    /// nodes already in the document, followed by the listener
+    /// registrations. Every render after the first is identical in both
+    /// modes.
+    ///
+    /// Hydration is positional: the served HTML must come from this same
+    /// component at this same initial state. A disagreement surfaces as a
+    /// host-side error, not as a silent repair.
+    hydrate,
+  }
+
   /// Start the app and return the mutation channel: the host receives the
   /// read end, reads batches of `operation`s from it for the life of the
   /// instance, and applies them to the mount root. The app's scheduler keeps
@@ -558,7 +610,7 @@ world app {
   /// (Historical: earlier revisions passed this stream to a host import
   /// `surface.open`, alongside a since-retired synchronous call transport —
   /// see bench/README.md for the retirement record.)
-  export run: async func() -> stream<operation>;
+  export run: async func(mode: render-mode) -> stream<operation>;
 
   /// Dispatch one DOM event to the listener registered on `target` (the
   /// ElementId carried by new-event-listener) for the interned event name

@@ -53,6 +53,16 @@ impl<W: io::Write> fmt::Write for FmtBridge<W> {
 /// flushed before this returns. Wrap it in a [`std::io::BufWriter`] when its
 /// writes are expensive — for a component-model `stream<u8>` each one costs a
 /// host context switch.
+///
+/// The output always carries hydration markers (`Renderer::pre_render`):
+/// `data-node-hydration` attributes, `<!--node-id N-->text<!--#-->` around
+/// dynamic text and `<!--placeholder N-->`. They are what makes the markup
+/// adoptable by the client renderer — `polymorph:dioxus`'s `render-mode.
+/// hydrate` binds element ids to nodes by counting these, and there is no
+/// other way to find them — and they are inert in a page that never
+/// hydrates. There is no marker-free mode because nothing here wants one:
+/// the whole point of rendering this markup on a server is that a client
+/// takes it over.
 pub fn render_to<W: io::Write>(root: fn() -> Element, out: W) -> io::Result<()> {
     let mut dom = VirtualDom::new(root);
     dom.rebuild_in_place();
@@ -62,7 +72,10 @@ pub fn render_to<W: io::Write>(root: fn() -> Element, out: W) -> io::Result<()> 
         err: None,
     };
 
-    match Renderer::new().render_to(&mut sink, &dom) {
+    let mut renderer = Renderer::new();
+    renderer.pre_render = true;
+
+    match renderer.render_to(&mut sink, &dom) {
         // `BufWriter`'s own `Drop` flush swallows errors, so flush here where
         // the result can still be reported.
         Ok(()) => sink.inner.flush(),

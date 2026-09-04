@@ -36,6 +36,9 @@ import { mountApp } from "../host/src/host.ts";
 declare global {
   interface Window {
     __DEFAULT_APP?: string;
+    /** Set by the page e2e/server.ts synthesizes at `/hydrate.html`, whose
+     * `#app` already holds the app's prerendered markup. */
+    __HYDRATE?: boolean;
   }
 }
 
@@ -117,9 +120,12 @@ async function main(): Promise<void> {
   // sha-256, so a mismatched deploy fails loudly at instantiation.
   const source = artifactsFromEnvelope(envelopeText, componentBytes);
 
+  const hydrate = (globalThis as unknown as Window).__HYDRATE === true;
+
   const mounted = await mountApp({
     source,
     root,
+    hydrate,
     onError: (err) => {
       errors.push({ source: "onError", detail: err instanceof Error ? (err.stack ?? err.message) : String(err) });
     },
@@ -137,8 +143,17 @@ async function main(): Promise<void> {
   //   - window.__e2eErrors: collected page/onError errors (asserted empty).
   (globalThis as unknown as { __mountedHandle: typeof mounted }).__mountedHandle = mounted;
 
+  // Hydrating, the app's markup is present from the first byte, so the
+  // usual "has the initial render landed" selector is already satisfied
+  // before the component even runs. What is observable instead is the
+  // hydrate operation consuming the server's text markers — the same signal
+  // host/tests/hydrate_component_test.ts waits on.
   const mountedSelector = APP_MOUNTED_SELECTOR[app] ?? "#count";
-  await waitFor(() => root.querySelector(mountedSelector) !== null);
+  await waitFor(
+    hydrate
+      ? () => !root.innerHTML.includes("<!--node-id")
+      : () => root.querySelector(mountedSelector) !== null,
+  );
 
   (globalThis as unknown as { __mounted: boolean }).__mounted = true;
   const statusEl = document.getElementById("status");
