@@ -25,9 +25,11 @@
 import { parseHTML } from "linkedom";
 import { mountApp } from "../host/src/host.ts";
 import type { Mounted } from "../host/src/host.ts";
-import { defaultTranslator } from "@deltic/translator";
+import type { UntranslatedArtifacts } from "@deltic/runtime/embedder";
 
-type Translator = Awaited<ReturnType<typeof defaultTranslator>>;
+/** Taken from the embedder's own type rather than restated, so this stays
+ * pinned to what `mountApp`'s `source` actually accepts. */
+type Translator = UntranslatedArtifacts["translator"];
 
 export const RUNS = 5;
 // Below this, for an op touching >=1000 rows, the number is not credible

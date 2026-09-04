@@ -1,0 +1,103 @@
+# CI for polyengine-dioxus.
+#
+# Runs exactly the gates `just` runs locally, in the same order and through
+# the same recipes, so a green check means what `just check && just test`
+# means on a workstation. New gates belong in the justfile, not here; this
+# file only supplies a machine to run them on.
+#
+# Why the build steps below are not optional: the component-loading suites
+# (host/tests/counter_test.ts, host/tests/fullstack_test.ts,
+# host/tests/operations_test.ts) THROW when their .wasm is missing rather
+# than skipping it, so dropping a build step turns the suite red rather
+# than quietly green.
+#
+# There is no longer a cross-language golden-vector gate to run. It existed
+# because the mutation wire format was implemented twice by hand (a Rust
+# encoder and a TypeScript decoder) and nothing but those vectors held the
+# two in agreement. The format is now an explicit WIT schema
+# (`interface mutations`) with bindgen owning both sides, so the vectors,
+# their generator and the TypeScript decoder are all deleted. What replaces
+# them as the end-to-end net is host/tests/operations_test.ts, which asserts
+# literal DOM output from a real mounted component — hence the counter build
+# step below being load-bearing rather than a nicety.
+#
+# Everything is version-pinned, matching how the rest of the repo pins
+# (POLYENGINE_REV in the justfile, `=0.7.10` dioxus, `=0.60.0`
+# wit-bindgen). A floating toolchain can turn `clippy -D warnings` red on a
+# new lint with no commit to blame.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  RUST_VERSION: "1.98.0"
+  DENO_VERSION: "2.9.5"
+  WASM_TOOLS_VERSION: "1.247.0"
+  JUST_VERSION: "1.54.0"
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # wasm32-wasip2 builds the app components; wasm32-unknown-unknown
+      # builds polyengine's translator shim in `just deps`.
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-wasip2, wasm32-unknown-unknown
+          components: clippy
+
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: ${{ env.DENO_VERSION }}
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Saves the pinned checkout and the built translator_shim.wasm, so
+      # `just deps` becomes a fetch+checkout on a hit. Excludes the shim's
+      # own build dir (large, and only needed when the shim is absent).
+      # Keyed on the whole justfile rather than POLYENGINE_REV alone:
+      # conservative (an unrelated justfile edit misses), but it cannot go
+      # stale against a rev bump, which is the failure that would matter.
+      - name: Cache pinned polyengine checkout
+        uses: actions/cache@v6
+        with:
+          path: |
+            .deps/polyengine
+            !.deps/polyengine/target
+          key: polyengine-${{ runner.os }}-${{ hashFiles('justfile') }}
+
+      - run: just deps
+
+      # cargo check + clippy -D warnings + deno check (host/src, host/tests,
+      # bench).
+      - run: just check
+
+      - name: Build test fixture component
+        run: just fixtures
+
+      - name: Build counter example component
+        run: just example counter
+
+      # cargo test (the interner unit tests; the writer names the generated
+      # bindings and so is wasm32-only, covered host-side instead) +
+      # deno task test.
+      - run: just test
