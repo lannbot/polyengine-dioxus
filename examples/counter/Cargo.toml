@@ -5,10 +5,29 @@ edition = "2021"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+# `rlib` alongside the component's `cdylib` so the SSG binary below can depend
+# on this crate for `App`.
+crate-type = ["cdylib", "rlib"]
+
+# Prints the prerendered HTML to stdout as a `wasi:cli/command` component, so
+# `wasmtime run` needs no flags to execute it.
+[[bin]]
+name = "counter-ssg"
+path = "src/bin/ssg.rs"
+required-features = ["ssg"]
+
+[features]
+default = ["client"]
+# The renderers are optional dependencies, not just optional code paths: each
+# emits a `component-type` custom section, and two of those in one binary is
+# not a component. Exactly one of these may be enabled at a time.
+client = ["dep:polyengine-dioxus"]
+ssg = ["dep:polyengine-dioxus-ssr"]
+ssr = ["dep:polyengine-dioxus-ssr", "polyengine-dioxus-ssr/serve"]
 
 [dependencies]
-polyengine-dioxus = { path = "../.." }
+polyengine-dioxus = { path = "../..", optional = true }
+polyengine-dioxus-ssr = { path = "../../ssr", optional = true }
 dioxus = { version = "=0.7.10", default-features = false, features = [
   "macro",
   "html",

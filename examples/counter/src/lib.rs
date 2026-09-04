@@ -12,7 +12,7 @@
 use dioxus::prelude::*;
 
 #[allow(non_snake_case)]
-fn App() -> Element {
+pub fn App() -> Element {
     let mut count = use_signal(|| 0i32);
     let mut draft = use_signal(String::new);
     let mut items = use_signal(|| vec!["alpha".to_string(), "beta".to_string()]);
@@ -86,4 +86,8 @@ fn App() -> Element {
     }
 }
 
+#[cfg(feature = "client")]
 polyengine_dioxus::launch!(App);
+
+#[cfg(feature = "ssr")]
+polyengine_dioxus_ssr::launch_ssr!(App);

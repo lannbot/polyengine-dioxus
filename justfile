@@ -40,10 +40,18 @@ deps:
 check:
     cargo check --workspace --target wasm32-wasip2
     cargo clippy --workspace --target wasm32-wasip2 -- -D warnings
+    # The workspace pass above sees every crate at DEFAULT features, so it
+    # never compiles the prerenderer's `serve` module or the `launch_ssr!`
+    # expansion. Checking the example covers both.
+    cargo clippy -p counter-example --no-default-features --features ssr \
+      --target wasm32-wasip2 -- -D warnings
     deno task check
 
 test:
     cargo test
+    # The workspace root is a package, so plain `cargo test` above is
+    # `-p polyengine-dioxus` and nothing else.
+    cargo test -p polyengine-dioxus-ssr
     deno task test
 
 # Build the surface-probe fixture component into fixtures/build/. The
@@ -81,6 +89,82 @@ example name:
       .deps/polyengine/tools/translate/main.ts \
       examples/build/{{name}}.component.wasm \
       -o examples/build/{{name}}.plan.json
+
+# Prerender the example to HTML, as a `wasi:cli/command` component.
+#
+# Checked twice against one golden file: natively, then as a component under
+# `wasmtime run`. Same source, same bytes — so a divergence between the two
+# is itself the signal, and neither check needs HTTP, ports or p3.
+ssg-example name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/build
+    cargo run -q -p {{name}}-example --no-default-features --features ssg \
+      --bin {{name}}-ssg | diff - examples/{{name}}/golden.html
+    cargo build -p {{name}}-example --no-default-features --features ssg \
+      --bin {{name}}-ssg --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/{{name}}-ssg.wasm \
+      examples/build/{{name}}.ssg.component.wasm
+    wasm-tools validate --features component-model examples/build/{{name}}.ssg.component.wasm
+    wasmtime run examples/build/{{name}}.ssg.component.wasm | diff - examples/{{name}}/golden.html
+
+# Build the example as a `wasi:http/service` component (prerender per request).
+ssr-example name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p examples/build
+    cargo build -p {{name}}-example --no-default-features --features ssr --lib \
+      --target wasm32-wasip2 --release
+    cp "target/wasm32-wasip2/release/$(echo {{name}} | tr - _)_example.wasm" \
+      examples/build/{{name}}.ssr.component.wasm
+    wasm-tools validate --features component-model,cm-async \
+      examples/build/{{name}}.ssr.component.wasm
+
+# Serve the prerendered example.
+#
+# `-S cli` is not optional: without it wasmtime links only the proxy world,
+# and a rustc wasm32-wasip2 component imports wasi:cli/environment,
+# wasi:filesystem/preopens and exit through wasi-libc. That one flag adds
+# both the p2 and the wasi:cli@0.3.x tracks.
+serve name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f examples/build/{{name}}.ssr.component.wasm ]; then
+      just ssr-example {{name}}
+    fi
+    wasmtime serve -S cli examples/build/{{name}}.ssr.component.wasm
+
+# Smoke-test the served component: it answers, with the golden HTML.
+#
+# HTML correctness is already settled by `just test` and `just ssg-example`;
+# what this covers is only the ~20-line HTTP wrapper. Binds port 0 and reads
+# the real port back from wasmtime's own output, so parallel checkouts cannot
+# collide, and kills by PID rather than by port.
+serve-test name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f examples/build/{{name}}.ssr.component.wasm ]; then
+      just ssr-example {{name}}
+    fi
+    log=$(mktemp)
+    wasmtime serve -S cli --addr 127.0.0.1:0 \
+      examples/build/{{name}}.ssr.component.wasm > "$log" 2>&1 &
+    pid=$!
+    trap 'kill $pid 2>/dev/null || true; rm -f "$log"' EXIT
+    port=""
+    for _ in $(seq 100); do
+      # No match yet is the normal case while wasmtime is still starting, and
+      # `set -euo pipefail` would otherwise abort the recipe on it.
+      port=$(grep -o 'http://127\.0\.0\.1:[0-9]*' "$log" | head -1 | cut -d: -f3 || true)
+      if [ -n "$port" ]; then break; fi
+      sleep 0.1
+    done
+    if [ -z "$port" ]; then
+      echo "serve never reported a port:" >&2
+      cat "$log" >&2
+      exit 1
+    fi
+    curl -sS --fail "http://127.0.0.1:$port/" | diff - examples/{{name}}/golden.html
 
 # Real-browser (Chromium via Playwright) E2E lane for the counter example.
 # First run: `cd e2e && npm install && npx playwright install chromium --with-deps`.

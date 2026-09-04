@@ -45,6 +45,7 @@ env:
   DENO_VERSION: "2.9.5"
   WASM_TOOLS_VERSION: "1.247.0"
   JUST_VERSION: "1.54.0"
+  WASMTIME_VERSION: "47.0.1"
 
 jobs:
   gates:
@@ -67,7 +68,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }}
+          tool: just@${{ env.JUST_VERSION }},wasm-tools@${{ env.WASM_TOOLS_VERSION }},wasmtime@${{ env.WASMTIME_VERSION }}
 
       - uses: Swatinem/rust-cache@v2
 
@@ -96,6 +97,14 @@ jobs:
 
       - name: Build counter example component
         run: just example counter
+
+      # Prerender lane. `ssg-example` checks the same golden file natively and
+      # under `wasmtime run`; `serve-test` adds only the wasi:http wrapper.
+      - name: Prerender the counter example
+        run: just ssg-example counter
+
+      - name: Serve the prerendered counter example
+        run: just serve-test counter
 
       # cargo test (the interner unit tests; the writer names the generated
       # bindings and so is wasm32-only, covered host-side instead) +
