@@ -26,6 +26,12 @@ dioxus-html = { version = "=0.7.10", default-features = false }
 # already in the tree via dioxus-core, so naming it costs nothing; used for
 # hot-path interning maps.
 rustc-hash = "2"
+# `NativeFileData::byte_stream` returns a `futures_util::Stream` trait object,
+# so we have to name the same trait to implement it. `bytes::Bytes` (the other
+# half of that signature) needs no dep of its own: dioxus-html re-exports it as
+# `dioxus_html::bytes`, which is how dioxus-web spells it too
+# (dioxus-web-0.7.10 src/files.rs:2).
+futures-util = { version = "0.3", default-features = false }
 # The `Document` provider is unconditional: it backs the world's `head`
 # interface (`Title`/`Meta`/`Style`/`Script`/`Link`), which is not opt-in.
 # Only its `eval` method is feature-gated (see src/document.rs).

@@ -31,8 +31,18 @@
 //!   reads `other`; clicking `.back` returns it to `home`.
 //! - a host-driven write on the `changes` stream flips `.route` without the
 //!   guest asking.
+//!
+//! `file`/`drag` (`events.file`/`events.data-transfer`):
+//! - selecting file(s) on `.file` (`<input type=file>`) reads each file's
+//!   name/size/content-type, its contents (`read_string`) and the byte count
+//!   `byte_stream` delivers, landing in
+//!   `.files` as `name:size:type:contents:streamed` entries joined by `|`.
+//! - `.drop`'s `ondragstart` writes `"from-guest"` into its `dataTransfer`
+//!   (`set_data`); its `ondrop` reads it back (`get_data`) and counts
+//!   `ev.files().len()`, landing in `.dropped` as `text:count`.
 
 use dioxus::document::{self, EvalError};
+use dioxus::html::HasFileData;
 use dioxus::prelude::*;
 
 #[derive(Routable, Clone, PartialEq)]
@@ -75,6 +85,8 @@ fn Other() -> Element {
 pub fn App() -> Element {
     let mut recv = use_signal(String::new);
     let mut join = use_signal(String::new);
+    let mut file_out = use_signal(String::new);
+    let mut drop_out = use_signal(String::new);
 
     use_future(move || async move {
         // Fire-and-forget: never awaited, so it also exercises the
@@ -125,6 +137,40 @@ pub fn App() -> Element {
                 "invalid"
             }
             Router::<Route> {}
+            input {
+                r#type: "file",
+                class: "file",
+                onchange: move |ev| async move {
+                    let files = ev.files();
+                    let mut out = Vec::new();
+                    for f in files {
+                        let s = f.read_string().await.unwrap_or_else(|e| format!("err:{e}"));
+                        // `byte_stream` too: a second, chunked read of the same
+                        // file, summed, so the host test sees both paths agree.
+                        let streamed = futures_util::StreamExt::fold(f.byte_stream(), 0usize, |n, c| async move {
+                            n + c.map(|b| b.len()).unwrap_or(0)
+                        })
+                        .await;
+                        out.push(format!("{}:{}:{}:{}:{}", f.name(), f.size(), f.content_type().unwrap_or_default(), s, streamed));
+                    }
+                    file_out.set(out.join("|"));
+                },
+            }
+            span { class: "files", "{file_out}" }
+            div {
+                class: "drop",
+                ondrop: move |ev| {
+                    let dt = ev.data_transfer();
+                    let text = dt.get_data("text/plain").unwrap_or_default();
+                    let n = ev.files().len();
+                    drop_out.set(format!("{text}:{n}"));
+                },
+                ondragstart: move |ev| {
+                    let _ = ev.data_transfer().set_data("text/plain", "from-guest");
+                },
+                "drop-target"
+            }
+            span { class: "dropped", "{drop_out}" }
         }
     }
 }

@@ -13,7 +13,7 @@
 //!
 //! # What "families we don't carry" means
 //!
-//! The WIT `payload` variant has fourteen arms; dioxus-html has 21 data
+//! The WIT `payload` variant has fifteen arms; dioxus-html has 21 data
 //! families. A `convert_*` for an uncarried family (focus, cancel, clipboard,
 //! media, selection and toggle — whose dioxus-html data types expose no
 //! accessors at all) has no data to work from, so it returns that family's
@@ -28,10 +28,23 @@
 //! dioxus-html's `RenderedElementBacking` in full, over the `dom` WIT
 //! interface — no `MountedData` query reports `NotSupported`.
 //!
+//! # Resources in a payload
+//!
+//! Two payload members are live host handles rather than snapshots: a form's
+//! `list<own<file>>` and a drag's `own<data-transfer>`. Dioxus converts a
+//! payload through a *shared* reference and may do so more than once per
+//! dispatch, but an owned handle can only be moved out once, so
+//! [`WitEventData::new`] lifts them out of the payload at construction into
+//! `Rc`-shared wrappers ([`WitFile`], [`WitDataTransfer`]) — the payload it
+//! stores afterwards has those members emptied. Both wrappers outlive the
+//! dispatch, which is what `wit/world.wit` promises: a handler may read a
+//! dropped file after its `await`.
+//!
 //! Likewise, a mismatched arm (e.g. `keyboard` payload arriving for a mouse
 //! family, which the host should never send) degrades to the neutral value
 //! instead of panicking: a malformed host must not take the app down.
 
+use dioxus_html::bytes::Bytes;
 use dioxus_html::geometry::{
     euclid::Point2D, ClientPoint, ElementPoint, PagePoint, Pixels, PixelsRect, PixelsSize,
     PixelsVector2D, ScreenPoint, WheelDelta,
@@ -41,19 +54,26 @@ use dioxus_html::point_interaction::{
     InteractionElementOffset, InteractionLocation, ModifiersInteraction, PointerInteraction,
 };
 use dioxus_html::{
-    AnimationData, CancelData, ClipboardData, Code, CompositionData, DragData, FocusData, FormData,
-    FormValue, HasAnimationData, HasCancelData, HasClipboardData, HasCompositionData, HasDragData,
+    AnimationData, CancelData, ClipboardData, Code, CompositionData, DataTransfer, DragData,
+    FileData, FocusData, FormData,
+    FormValue, HasAnimationData, HasCancelData, HasClipboardData, HasCompositionData,
+    HasDataTransferData, HasDragData,
     HasFileData, HasFocusData, HasFormData, HasImageData, HasKeyboardData, HasMediaData,
     HasMouseData, HasPointerData, HasResizeData, HasScrollData, HasSelectionData, HasToggleData,
     HasTouchData, HasTouchPointData, HasTransitionData, HasVisibleData, HasWheelData,
     HtmlEventConverter, ImageData, Key, KeyboardData, MediaData, Modifiers, MountedData,
-    MountedError, MountedResult, MouseData,
+    MountedError, MountedResult, MouseData, NativeDataTransfer, NativeFileData,
     PlatformEventData, PointerData, RenderedElementBacking, ResizeData, ResizeResult, ScrollData,
     SelectionData, ScrollBehavior, ScrollLogicalPosition, ScrollToOptions, ToggleData, TouchData,
     TouchPoint, TransitionData, VisibleData, VisibleError, VisibleResult, WheelData,
 };
+use dioxus_core::CapturedError;
+use futures_util::Stream;
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
+use std::rc::Rc;
+use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime};
 
 use crate::bindings::polymorph::dioxus::dom;
@@ -65,9 +85,30 @@ use crate::bindings::polymorph::dioxus::events as wit;
 pub struct WitEventData {
     pub payload: wit::Payload,
     pub target: u32,
+    /// A form payload's files, wrapped once (see the module doc). Empty for
+    /// every other family — a drag's files come from its `data-transfer`,
+    /// which hands out fresh handles on each call.
+    files: Vec<FileData>,
+    /// A drag payload's live `DataTransfer`, if the event had one.
+    transfer: Option<Rc<wit::DataTransfer>>,
 }
 
 impl WitEventData {
+    /// Lifts the payload's owned resource handles out into `Rc`-shared
+    /// wrappers; see the module doc for why this cannot wait until conversion.
+    pub fn new(mut payload: wit::Payload, target: u32) -> Self {
+        let mut files = Vec::new();
+        let mut transfer = None;
+        match &mut payload {
+            wit::Payload::Form(f) => {
+                files = std::mem::take(&mut f.files).into_iter().map(file_data).collect();
+            }
+            wit::Payload::Drag(d) => transfer = d.transfer.take().map(Rc::new),
+            _ => {}
+        }
+        Self { payload, target, files, transfer }
+    }
+
     fn mouse(&self) -> wit::MouseData {
         match &self.payload {
             wit::Payload::Mouse(m) => *m,
@@ -76,6 +117,7 @@ impl WitEventData {
             // so reading through is exactly right.
             wit::Payload::Pointer(p) => p.mouse,
             wit::Payload::Wheel(w) => w.mouse,
+            wit::Payload::Drag(d) => d.mouse,
             _ => empty_mouse(),
         }
     }
@@ -324,13 +366,176 @@ impl HasKeyboardData for Keyboard {
     }
 }
 
-struct Form(wit::FormData);
+/// How much of a file we ask the host for per stream read in
+/// [`NativeFileData::byte_stream`]. The stream is chunked by whatever the host
+/// writes; this only bounds the buffer we hand each read.
+const FILE_CHUNK: usize = 64 * 1024;
+
+/// One `own<file>` handle from a form payload or a `data-transfer`, behind the
+/// `Rc` that lets the same handle back several `FileData` clones.
+///
+/// The `Rc` is what makes the `Send + Sync` on [`NativeFileData`] a lie we have
+/// to tell: dioxus stores the backing in an `Arc<dyn NativeFileData>`, so the
+/// bound is unconditional even on single-threaded platforms. dioxus-web asserts
+/// it the same way for the same reason (dioxus-web-0.7.10 src/files.rs:17-18,
+/// `unsafe impl Send/Sync for WebFileData` over a `web_sys::File`). It holds
+/// here because a component instance is single-threaded: wasm32-wasip2 has no
+/// threads we spawn, and a resource handle is only valid in the instance that
+/// received it, so no `FileData` we hand out can be touched from elsewhere.
+struct WitFile(Rc<wit::File>);
+
+// SAFETY: see the type's doc — the component instance is single-threaded, so
+// the `Rc` and the handle inside it are never reached from another thread.
+unsafe impl Send for WitFile {}
+unsafe impl Sync for WitFile {}
+
+fn file_data(file: wit::File) -> FileData {
+    FileData::new(WitFile(Rc::new(file)))
+}
+
+/// Same assertion as [`WitFile`], for the one place a *value* rather than a
+/// backing has to cross the bound: `byte_stream`'s return type is `+ Send`
+/// (dioxus-html-0.7.10 src/file_data.rs:73-82), but the stream holds the
+/// non-`Send` `StreamReader`. dioxus-web wraps its stream in `send_wrapper`'s
+/// `SendWrapper` for this (src/files.rs:120); `SendWrapper` additionally panics
+/// on a cross-thread drop, which buys nothing on a target with one thread, so
+/// we assert directly rather than take the dependency.
+///
+/// The inner stream is boxed (hence `Unpin`), so the delegation below needs no
+/// pin projection.
+struct SingleThreadedStream(Pin<Box<dyn Stream<Item = Result<Bytes, CapturedError>>>>);
+
+// SAFETY: as [`WitFile`] — one thread per component instance.
+unsafe impl Send for SingleThreadedStream {}
+
+impl Stream for SingleThreadedStream {
+    type Item = Result<Bytes, CapturedError>;
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.0.as_mut().poll_next(cx)
+    }
+}
+
+impl NativeFileData for WitFile {
+    fn name(&self) -> String {
+        self.0.name()
+    }
+    fn size(&self) -> u64 {
+        self.0.size()
+    }
+    fn last_modified(&self) -> u64 {
+        self.0.last_modified()
+    }
+    fn content_type(&self) -> Option<String> {
+        self.0.content_type()
+    }
+    fn path(&self) -> PathBuf {
+        // The wire carries no path: a browser `File` has none to give, and
+        // dioxus-web falls back to the bare name for exactly that reason
+        // (src/files.rs:143).
+        PathBuf::from(self.0.name())
+    }
+
+    fn read_bytes(&self) -> Pin<Box<dyn Future<Output = Result<Bytes, CapturedError>> + 'static>> {
+        let file = self.0.clone();
+        // `read` starts a fresh read each call (wit/world.wit), and `collect`
+        // drains the stream to its end (wit-bindgen-0.60.0
+        // src/rt/async_support/stream_support.rs:551).
+        Box::pin(async move { Ok(Bytes::from(file.read().collect().await)) })
+    }
+
+    fn read_string(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<String, CapturedError>> + 'static>> {
+        let file = self.0.clone();
+        Box::pin(async move { Ok(String::from_utf8(file.read().collect().await)?) })
+    }
+
+    fn byte_stream(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = Result<Bytes, CapturedError>> + 'static + Send>> {
+        let file = self.0.clone();
+        let reader = file.read();
+        let inner: Pin<Box<dyn Stream<Item = Result<Bytes, CapturedError>>>> =
+            // The state keeps the file handle alive alongside its reader, and
+            // goes `None` once the host dropped the write end.
+            Box::pin(futures_util::stream::unfold(Some((file, reader)), |state| async move {
+                let (file, mut reader) = state?;
+                loop {
+                    let (status, buf) = reader.read(Vec::with_capacity(FILE_CHUNK)).await;
+                    let more = matches!(status, wit_bindgen::rt::async_support::StreamResult::Complete(_));
+                    if buf.is_empty() {
+                        // A zero-length read on a still-open stream is not the
+                        // end; yielding an empty chunk for it would be noise.
+                        if more {
+                            continue;
+                        }
+                        return None;
+                    }
+                    // A final read can deliver bytes *and* the drop together,
+                    // so the last chunk still gets yielded (this is what
+                    // `collect` relies on too, stream_support.rs:558-566).
+                    return Some((Ok(Bytes::from(buf)), more.then_some((file, reader))));
+                }
+            }));
+        Box::pin(SingleThreadedStream(inner))
+    }
+
+    fn inner(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// A drag's live `data-transfer` handle. One-to-one with
+/// [`NativeDataTransfer`]; `Send + Sync` as [`WitFile`].
+struct WitDataTransfer(Rc<wit::DataTransfer>);
+
+// SAFETY: as [`WitFile`] — one thread per component instance.
+unsafe impl Send for WitDataTransfer {}
+unsafe impl Sync for WitDataTransfer {}
+
+impl NativeDataTransfer for WitDataTransfer {
+    fn get_data(&self, format: &str) -> Option<String> {
+        self.0.get_data(format)
+    }
+    fn set_data(&self, format: &str, data: &str) -> Result<(), String> {
+        self.0.set_data(format, data)
+    }
+    fn clear_data(&self, format: Option<&str>) -> Result<(), String> {
+        self.0.clear_data(format)
+    }
+    fn effect_allowed(&self) -> String {
+        self.0.effect_allowed()
+    }
+    fn set_effect_allowed(&self, effect: &str) {
+        self.0.set_effect_allowed(effect);
+    }
+    fn drop_effect(&self) -> String {
+        self.0.drop_effect()
+    }
+    fn set_drop_effect(&self, effect: &str) {
+        self.0.set_drop_effect(effect);
+    }
+    fn files(&self) -> Vec<FileData> {
+        // `files` mints fresh owned handles per call (wit/world.wit), so this
+        // needs no caching to stay correct — it mirrors dioxus-web, which
+        // rebuilds from the live `FileList` each time (src/data_transfer.rs:52).
+        self.0.files().into_iter().map(file_data).collect()
+    }
+}
+
+/// A form event. Built field-by-field rather than by holding the payload arm:
+/// `wit::FormData` owns file handles and so cannot be `Clone`.
+struct Form {
+    value: String,
+    values: Vec<(String, Vec<String>)>,
+    files: Vec<FileData>,
+}
 
 impl HasFileData for Form {
-    fn files(&self) -> Vec<dioxus_html::FileData> {
-        // File payloads are not carried across the boundary in this version
-        // (they would need the file contents or a host-side handle resource).
-        Vec::new()
+    fn files(&self) -> Vec<FileData> {
+        // `FileData` is `Clone` (an `Arc` over the backing), so every call
+        // hands out the same underlying handles.
+        self.files.clone()
     }
 }
 
@@ -345,7 +550,7 @@ impl HasFormData for Form {
         // (the conservative reading: never destroy the control's real value),
         // which means the host must encode checkable controls dioxus-style
         // for `checked()` to be meaningful. Flagged in the track report.
-        self.0.value.clone()
+        self.value.clone()
     }
     fn valid(&self) -> bool {
         // Constraint validation state is not carried; `true` matches the
@@ -357,8 +562,7 @@ impl HasFormData for Form {
         // every value). dioxus's `FormValue` is one value per entry, so a
         // multi-select contributes several entries under the same name —
         // which is exactly how `FormData::values()` consumers read it.
-        self.0
-            .values
+        self.values
             .iter()
             .flat_map(|(name, vals)| {
                 vals.iter().map(move |v| (name.clone(), FormValue::Text(v.clone())))
@@ -694,51 +898,52 @@ impl HasTouchData for Empty {
 }
 
 impl HasFileData for Empty {
-    fn files(&self) -> Vec<dioxus_html::FileData> {
+    fn files(&self) -> Vec<FileData> {
         Vec::new()
     }
 }
 
-/// Drag events ARE mapped to the `mouse` family by the host —
-/// host/src/events.ts dispatches all `drag*`/`drop` names to `{ kind:
-/// "mouse", ... }`, since DOM drag events are MouseEvents and dioxus-html's
-/// `DragData` implements `HasMouseData` (dioxus-html src/events/drag.rs).
-/// The WIT payload variant list has no dedicated `drag` arm; this struct
-/// reuses [`Mouse`] for the positional half and supplies empty
-/// file/data-transfer halves, since the host does not send a data-transfer
-/// snapshot.
-struct Drag(wit::MouseData);
+/// A drag event: a mouse snapshot plus, when the event had one, the live
+/// `data-transfer` handle it came with (`wit::DragData`). dioxus-html's
+/// `DragData` is `HasMouseData + HasFileData + HasDataTransferData`
+/// (dioxus-html-0.7.10 src/events/drag.rs), and all three halves are real
+/// here: the positional one reuses [`Mouse`], the other two go through the
+/// transfer.
+struct Drag {
+    mouse: wit::MouseData,
+    transfer: Option<Rc<wit::DataTransfer>>,
+}
 
 impl InteractionLocation for Drag {
     fn client_coordinates(&self) -> ClientPoint {
-        Mouse(self.0).client_coordinates()
+        Mouse(self.mouse).client_coordinates()
     }
     fn screen_coordinates(&self) -> ScreenPoint {
-        Mouse(self.0).screen_coordinates()
+        Mouse(self.mouse).screen_coordinates()
     }
     fn page_coordinates(&self) -> PagePoint {
-        Mouse(self.0).page_coordinates()
+        Mouse(self.mouse).page_coordinates()
     }
 }
 
 impl InteractionElementOffset for Drag {
     fn element_coordinates(&self) -> ElementPoint {
-        Mouse(self.0).element_coordinates()
+        Mouse(self.mouse).element_coordinates()
     }
 }
 
 impl ModifiersInteraction for Drag {
     fn modifiers(&self) -> Modifiers {
-        modifiers(self.0.mods)
+        modifiers(self.mouse.mods)
     }
 }
 
 impl PointerInteraction for Drag {
     fn trigger_button(&self) -> Option<MouseButton> {
-        Mouse(self.0).trigger_button()
+        Mouse(self.mouse).trigger_button()
     }
     fn held_buttons(&self) -> MouseButtonSet {
-        Mouse(self.0).held_buttons()
+        Mouse(self.mouse).held_buttons()
     }
 }
 
@@ -749,14 +954,22 @@ impl HasMouseData for Drag {
 }
 
 impl HasFileData for Drag {
-    fn files(&self) -> Vec<dioxus_html::FileData> {
-        Vec::new()
+    fn files(&self) -> Vec<FileData> {
+        // `DragData::files()` is `dataTransfer.files` — the same list, reached
+        // the short way (dioxus-web does this too, src/data_transfer.rs:52).
+        match &self.transfer {
+            Some(t) => WitDataTransfer(t.clone()).files(),
+            None => Vec::new(),
+        }
     }
 }
 
-impl dioxus_html::HasDataTransferData for Drag {
-    fn data_transfer(&self) -> dioxus_html::DataTransfer {
-        dioxus_html::DataTransfer::new(EmptyDataTransfer)
+impl HasDataTransferData for Drag {
+    fn data_transfer(&self) -> DataTransfer {
+        match &self.transfer {
+            Some(t) => DataTransfer::new(WitDataTransfer(t.clone())),
+            None => DataTransfer::new(EmptyDataTransfer),
+        }
     }
 }
 
@@ -766,16 +979,18 @@ impl HasDragData for Drag {
     }
 }
 
-/// A drag/clipboard data-transfer object with nothing in it: the wire does not
-/// carry `DataTransfer` contents in this version.
+/// The stand-in for `drag-data.transfer: none` — an event the host built
+/// without a `dataTransfer` (a synthetic one), or a payload arm that did not
+/// match the drag family at all. Empty rather than absent, because
+/// `HasDataTransferData::data_transfer` has no way to say "there is none".
 struct EmptyDataTransfer;
 
-impl dioxus_html::NativeDataTransfer for EmptyDataTransfer {
+impl NativeDataTransfer for EmptyDataTransfer {
     fn get_data(&self, _format: &str) -> Option<String> {
         None
     }
     fn set_data(&self, _format: &str, _data: &str) -> Result<(), String> {
-        Err("data transfer is not carried across the polymorph:dioxus boundary".into())
+        Err("this drag event carried no data transfer".into())
     }
     fn clear_data(&self, _format: Option<&str>) -> Result<(), String> {
         Ok(())
@@ -789,7 +1004,7 @@ impl dioxus_html::NativeDataTransfer for EmptyDataTransfer {
         "none".into()
     }
     fn set_drop_effect(&self, _effect: &str) {}
-    fn files(&self) -> Vec<dioxus_html::FileData> {
+    fn files(&self) -> Vec<FileData> {
         Vec::new()
     }
 }
@@ -999,14 +1214,20 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_form_data(&self, event: &PlatformEventData) -> FormData {
-        match payload(event).map(|p| &p.payload) {
-            Some(wit::Payload::Form(f)) => FormData::new(Form(f.clone())),
-            _ => FormData::new(Form(wit::FormData {
-                value: String::new(),
-                checked: None,
-                values: Vec::new(),
-            })),
-        }
+        let form = match payload(event) {
+            Some(p) => match &p.payload {
+                wit::Payload::Form(f) => Form {
+                    value: f.value.clone(),
+                    values: f.values.clone(),
+                    // Lifted out of the payload at construction; see the
+                    // module doc on resources.
+                    files: p.files.clone(),
+                },
+                _ => Form { value: String::new(), values: Vec::new(), files: Vec::new() },
+            },
+            None => Form { value: String::new(), values: Vec::new(), files: Vec::new() },
+        };
+        FormData::new(form)
     }
 
     fn convert_scroll_data(&self, event: &PlatformEventData) -> ScrollData {
@@ -1024,7 +1245,18 @@ impl HtmlEventConverter for WitEventConverter {
     }
 
     fn convert_drag_data(&self, event: &PlatformEventData) -> DragData {
-        DragData::new(Drag(payload(event).map(|p| p.mouse()).unwrap_or_else(empty_mouse)))
+        // Only the `drag` arm produces a drag: the host routes every
+        // `drag*`/`drop` name to it now, so a `mouse` payload arriving here is
+        // a host bug, and quietly half-converting it would hide that. It
+        // degrades to the neutral value like every other family mismatch.
+        let drag = match payload(event) {
+            Some(p) => match &p.payload {
+                wit::Payload::Drag(d) => Drag { mouse: d.mouse, transfer: p.transfer.clone() },
+                _ => Drag { mouse: empty_mouse(), transfer: None },
+            },
+            None => Drag { mouse: empty_mouse(), transfer: None },
+        };
+        DragData::new(drag)
     }
 
     fn convert_focus_data(&self, _: &PlatformEventData) -> FocusData {

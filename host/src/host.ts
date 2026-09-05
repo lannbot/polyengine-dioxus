@@ -15,7 +15,7 @@ import { DomApplier } from "./applier.ts";
 import { DispatchGate } from "./dispatch.ts";
 import { createEvalImports } from "./eval.ts";
 import type { EvalImports } from "./eval.ts";
-import { EventDispatcher, serializePayload } from "./events.ts";
+import { EventDispatcher, HostDataTransfer, HostFile, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
 import { createHeadImports } from "./head.ts";
 import type { HeadImports } from "./head.ts";
@@ -498,11 +498,12 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     ...wasi(),
     // Keyed by the verbatim interface id (contract:"Module wiring and
     // instantiation"), so the version tracks the WIT package version —
-    // now 0.6.0. `events`' sole host-implemented item is the `dom-event`
-    // resource, named by its bindgen-emitted UpperCamel name
-    // (contract:"Resources"); `dom`'s items are functions, named by their
-    // bindgen-emitted lowerCamel names.
-    "polymorph:dioxus/events@0.6.0": { DomEvent },
+    // now 0.6.0. `events`' host-implemented items are the `dom-event`,
+    // `file`, and `data-transfer` resources, named by their bindgen-emitted
+    // UpperCamel names (contract:"Resources"; wit resource name `file` ->
+    // `File`, `data-transfer` -> `DataTransfer`); `dom`'s items are
+    // functions, named by their bindgen-emitted lowerCamel names.
+    "polymorph:dioxus/events@0.6.0": { DomEvent, File: HostFile, DataTransfer: HostDataTransfer },
     "polymorph:dioxus/dom@0.6.0": createDomImports(applier, gate, opts.intercept?.dom),
     // Unconditional imports (wit `world app`): every component gets these,
     // eval feature or not.
