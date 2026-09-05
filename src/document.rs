@@ -1,12 +1,16 @@
-//! `document::eval` over the world's `eval` interface: the opt-in JS bridge.
+//! The `dioxus_document::Document` provider: the `<head>` writes over the
+//! world's `head` interface, and — under the crate's `eval` feature —
+//! `document::eval` over its opt-in `eval` interface.
 //!
-//! Compiled only under the crate's `eval` feature; without it nothing here
-//! exists, no `polymorph:dioxus/eval` import is emitted, and dioxus falls
-//! back to `NoOpDocument` (`EvalError::Unsupported`). See the `eval`
-//! interface doc in `wit/world.wit` for why the capability is opt-in on both
-//! sides.
+//! `head` is unconditional, so [`WitDocument`] and its `set_title` /
+//! `create_head_element` overrides always exist. Only the `eval` method's
+//! body is gated: without the feature it delegates to dioxus's
+//! `NoOpDocument` (`EvalError::Unsupported`), nothing here names the `eval`
+//! interface, and no `polymorph:dioxus/eval` import is emitted. See the
+//! `eval` interface doc in `wit/world.wit` for why that capability is opt-in
+//! on both sides.
 //!
-//! # The owner-lifetime problem
+//! # The owner-lifetime problem (`eval` only)
 //!
 //! `dioxus_document::Eval` is `Copy` and holds only a
 //! `GenerationalBox<Box<dyn Evaluator>>` (dioxus-document-0.7.10
@@ -46,17 +50,32 @@
 //! `try_read` failure path answers `EvalError::Finished` — which is also
 //! what a second `join` gets.
 
+use dioxus_core::queue_effect;
+use dioxus_document::{Document, Eval};
+
+use crate::bindings::polymorph::dioxus::head;
+
+#[cfg(feature = "eval")]
 use std::cell::RefCell;
+#[cfg(feature = "eval")]
 use std::future::Future;
+#[cfg(feature = "eval")]
 use std::pin::Pin;
+#[cfg(feature = "eval")]
 use std::rc::Rc;
+#[cfg(feature = "eval")]
 use std::task::{Context, Poll, Waker};
 
-use dioxus_document::{Document, Eval, EvalError, Evaluator};
+#[cfg(feature = "eval")]
+use dioxus_document::{EvalError, Evaluator};
+#[cfg(feature = "eval")]
 use generational_box::{AnyStorage, GenerationalBox, Owner, UnsyncStorage};
+#[cfg(feature = "eval")]
 use wit_bindgen::rt::async_support::{spawn_local, StreamReader, StreamWriter};
 
+#[cfg(feature = "eval")]
 use crate::bindings::polymorph::dioxus::eval;
+#[cfg(feature = "eval")]
 use crate::bindings::wit_stream;
 
 /// The polyengine document provider, installed as `Rc<dyn Document>` root
@@ -65,13 +84,60 @@ use crate::bindings::wit_stream;
 pub struct WitDocument;
 
 impl Document for WitDocument {
+    #[cfg(feature = "eval")]
     fn eval(&self, js: String) -> Eval {
         Eval::new(WitEvaluator::create(js))
+    }
+
+    /// Without the `eval` feature the crate names no `eval` interface at all,
+    /// so this is dioxus's own graceful answer: `EvalError::Unsupported`
+    /// (dioxus-document-0.7.10 src/document.rs:121-145). `eval` is a required
+    /// trait method, so it cannot simply be left off.
+    #[cfg(not(feature = "eval"))]
+    fn eval(&self, _js: String) -> Eval {
+        dioxus_document::NoOpDocument.eval(String::new())
+    }
+
+    fn set_title(&self, title: String) {
+        // Queued for the same reason dioxus-web queues its head writes
+        // (dioxus-web-0.7.10 src/document.rs:123-128): a head component may
+        // render while suspended, and the write must not happen until the
+        // effect runs.
+        queue_effect(move || {
+            head::set_title(&title);
+        });
+    }
+
+    /// The one override covering `Title`'s siblings: dioxus's default
+    /// `create_meta` / `create_script` / `create_style` / `create_link` all
+    /// funnel through here (dioxus-document-0.7.10 src/document.rs:85-107),
+    /// each already passing the props' attribute list and, for script/style,
+    /// the text contents. dioxus-web overrides the four individually only
+    /// because it needs no more than they give.
+    fn create_head_element(
+        &self,
+        name: &str,
+        attributes: &[(&str, String)],
+        contents: Option<String>,
+    ) {
+        let tag = name.to_string();
+        let attributes: Vec<(String, String)> = attributes
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), v.clone()))
+            .collect();
+        queue_effect(move || {
+            // `false` = the host refused (an interceptor's decision, or a
+            // `<script>` without eval granted). Nothing to do with it:
+            // dioxus's `Document` methods return `()`, so refusal is silent
+            // by design (wit/world.wit, `interface head`).
+            head::create_element(&tag, &attributes, contents.as_deref());
+        });
     }
 }
 
 /// Where the completed `join` result lands, and how the awaiting task (if
 /// any) learns about it.
+#[cfg(feature = "eval")]
 #[derive(Default)]
 struct JoinState {
     result: Option<Result<serde_json::Value, EvalError>>,
@@ -82,8 +148,10 @@ struct JoinState {
 }
 
 /// The owner slot; `None` once released.
+#[cfg(feature = "eval")]
 type OwnerSlot = Rc<RefCell<Option<Owner<UnsyncStorage>>>>;
 
+#[cfg(feature = "eval")]
 type NextRecv = Pin<Box<dyn Future<Output = Result<serde_json::Value, EvalError>>>>;
 
 /// The guest→script half. `Evaluator::send` is synchronous but a stream write
@@ -91,6 +159,7 @@ type NextRecv = Pin<Box<dyn Future<Output = Result<serde_json::Value, EvalError>
 /// writer is taken for the duration of that drain, mirroring the renderer's
 /// `stream`/`pending` pattern in [`crate::driver`] (at most one write may be
 /// in flight per end).
+#[cfg(feature = "eval")]
 struct Sender {
     /// `None` while a drain owns it, and permanently once the read end is
     /// gone (the writer is dropped then, closing the stream).
@@ -99,6 +168,7 @@ struct Sender {
     pending: Vec<String>,
 }
 
+#[cfg(feature = "eval")]
 struct WitEvaluator {
     send: Rc<RefCell<Sender>>,
     /// The script→guest half, held in a slot so [`WitEvaluator::poll_recv`]'s
@@ -111,6 +181,7 @@ struct WitEvaluator {
     next_recv: Option<NextRecv>,
 }
 
+#[cfg(feature = "eval")]
 impl WitEvaluator {
     fn create(js: String) -> GenerationalBox<Box<dyn Evaluator>> {
         let (writer, send_reader) = wit_stream::new();
@@ -160,6 +231,7 @@ impl WitEvaluator {
     }
 }
 
+#[cfg(feature = "eval")]
 impl Evaluator for WitEvaluator {
     fn poll_join(&mut self, cx: &mut Context<'_>) -> Poll<Result<serde_json::Value, EvalError>> {
         let mut state = self.state.borrow_mut();
@@ -245,9 +317,15 @@ impl Evaluator for WitEvaluator {
 }
 
 /// The WIT `error` cases onto dioxus's `EvalError`, one for one.
+#[cfg(feature = "eval")]
 fn eval_error(error: eval::Error) -> EvalError {
     match error {
         eval::Error::InvalidJs(message) => EvalError::InvalidJs(message),
         eval::Error::Communication(message) => EvalError::Communication(message),
+        // The host declined to run this script. The WIT names the mapping:
+        // `EvalError::Unsupported`, the same graceful answer `NoOpDocument`
+        // gives, so an app degrades exactly as it would with no eval at all
+        // (wit/world.wit, `interface eval`, `error.denied`).
+        eval::Error::Denied => EvalError::Unsupported,
     }
 }

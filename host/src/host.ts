@@ -14,10 +14,34 @@ import type { Stream } from "@deltic/protocol";
 import { DomApplier } from "./applier.ts";
 import { DispatchGate } from "./dispatch.ts";
 import { createEvalImports } from "./eval.ts";
+import type { EvalImports } from "./eval.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
+import { createHeadImports } from "./head.ts";
+import type { HeadImports } from "./head.ts";
+import { createHistoryImports, fragmentHistory, memoryHistory } from "./history.ts";
+import type { HistoryImports, HistoryProvider } from "./history.ts";
+import { type Interceptors, wrap } from "./intercept.ts";
 import { applyOperations } from "./operations.ts";
 import type { Operation } from "./operations.ts";
+
+/** The host side of `polymorph:dioxus/dom`'s import table, as built by
+ * `createDomImports` — the type `MountOptions.intercept.dom` interceptors
+ * are checked against. Declared explicitly (rather than
+ * `ReturnType<typeof createDomImports>`) because `createDomImports` itself
+ * takes an `Interceptors<DomImports>` argument — a `ReturnType` alias would
+ * circularly reference itself through that parameter. */
+export interface DomImports {
+  getScrollOffset(target: number): Point | undefined;
+  getScrollSize(target: number): Size | undefined;
+  getClientRect(target: number): Rect | undefined;
+  scrollTo(target: number, options: ScrollToOptions_): boolean;
+  scroll(target: number, offset: Point, behavior: ScrollBehavior_): boolean;
+  setFocus(target: number, focus: boolean): boolean;
+  // deno-lint-ignore no-explicit-any
+  [key: string]: (...args: any[]) => any;
+}
+export type { EvalImports, HeadImports, HistoryImports };
 
 export interface MountOptions {
   /** Component artifacts in either form `instantiate` accepts: a
@@ -56,6 +80,26 @@ export interface MountOptions {
    * an untrusted app: a browser cannot sandbox arbitrary JS, so this is a
    * trusted-computing-base decision, not a per-mount convenience. */
   eval?: boolean;
+  /** How `polymorph:dioxus/history` (wit/world.wit `interface history`)
+   * meets the real browser: `"memory"` (default) keeps an in-memory stack
+   * with no URL involvement (`history.ts`'s `memoryHistory`); `"fragment"`
+   * encodes the route into `location.hash` (`fragmentHistory`) — the shape
+   * for a host that does not own the path, such as polyvisor's apps.
+   * Requires `globalThis.window` when `"fragment"`. */
+  history?: "memory" | "fragment";
+  /** Per-operation policy hooks over the host-implemented import tables
+   * (host/src/intercept.ts is normative: what an interceptor may do, the
+   * denial spellings, why THROWING from one is a host bug, and why
+   * `intercept.eval` without `eval: true` is a configuration error rather
+   * than a way to grant eval — enforced below, at mount, before
+   * instantiation). Absent means every fragment's default behavior,
+   * unmodified — the pre-interceptor behavior of every existing caller. */
+  intercept?: {
+    dom?: Interceptors<DomImports>;
+    eval?: Interceptors<EvalImports>;
+    head?: Interceptors<HeadImports>;
+    history?: Interceptors<HistoryImports>;
+  };
 }
 
 export interface Mounted {
@@ -73,6 +117,11 @@ export interface Mounted {
    * as a real DOM listener would (used by fullstack tests and by real
    * event listeners alike). */
   dispatch(targetEl: Element | null, name: string, ev: NativeEventLike): void;
+  /** The `HistoryProvider` backing `polymorph:dioxus/history` for this
+   * mount (`memoryHistory`/`fragmentHistory`, host/src/history.ts).
+   * Exposed for tests and embedders driving history from the host side
+   * (`mounted.history.back()`, an external-navigation notification). */
+  history: HistoryProvider;
 }
 
 
@@ -215,7 +264,11 @@ function isNum(v: number | undefined): v is number {
  * bracket around them would be pure noise (and would suggest to a reader
  * that reading `scrollTop` can re-enter the guest, which it cannot).
  */
-export function createDomImports(applier: DomApplier, gate: DispatchGate) {
+export function createDomImports(
+  applier: DomApplier,
+  gate: DispatchGate,
+  interceptors?: Interceptors<DomImports>,
+) {
   /** Resolve an ElementId to a live node, or `undefined` (see the
    * two-ways-to-miss list above). */
   function live(target: number): DomTarget | undefined {
@@ -238,26 +291,16 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
     return el === undefined ? undefined : read(el);
   }
 
-  /** A mutating operation: bracketed, so native events it fires
-   * synchronously are queued by the gate and drained once the calling
-   * guest's turn unwinds instead of re-entering the instance. `act`
-   * returns false when the node does not support it.
-   *
-   * The bracket is not re-entrant (`#applying` is a flag, not a counter),
-   * which is sound: the guest cannot call one of these imports while its
-   * own mutation batch is being applied — during application it is parked
-   * in the stream-write rendezvous, not executing. */
-  function command(target: number, act: (el: DomTarget) => boolean): boolean {
-    gate.beginApply();
-    try {
-      const el = live(target);
-      return el === undefined ? false : act(el);
-    } finally {
-      gate.endApply();
-    }
+  /** A mutating operation's UNBRACKETED body (intercept.ts: "the gate
+   * bracket is outside the interceptor" — this fragment's bracket goes
+   * around the wrapped table below, not in here). `act` returns false
+   * when the node does not support it. */
+  function act(target: number, run: (el: DomTarget) => boolean): boolean {
+    const el = live(target);
+    return el === undefined ? false : run(el);
   }
 
-  return {
+  const impls = {
     getScrollOffset(target: number): Point | undefined {
       return query(target, (el) =>
         isNum(el.scrollLeft) && isNum(el.scrollTop)
@@ -285,7 +328,7 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
     },
 
     scrollTo(target: number, options: ScrollToOptions_): boolean {
-      return command(target, (el) => {
+      return act(target, (el) => {
         if (typeof el.scrollIntoView !== "function") return false;
         // wit: `vertical`/`horizontal` ARE the DOM's `block`/`inline`.
         el.scrollIntoView({
@@ -298,7 +341,7 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
     },
 
     scroll(target: number, offset: Point, behavior: ScrollBehavior_): boolean {
-      return command(target, (el) => {
+      return act(target, (el) => {
         if (typeof el.scrollTo !== "function") return false;
         el.scrollTo({ left: offset.x, top: offset.y, behavior });
         return true;
@@ -306,13 +349,43 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
     },
 
     setFocus(target: number, focus: boolean): boolean {
-      return command(target, (el) => {
+      return act(target, (el) => {
         const fn = focus ? el.focus : el.blur;
         if (typeof fn !== "function") return false;
         fn.call(el);
         return true;
       });
     },
+  };
+
+  const wrapped = wrap(impls, interceptors);
+
+  /** Bracket a mutating op: native events it fires synchronously are
+   * queued by the gate and drained once the calling guest's turn unwinds
+   * instead of re-entering the instance.
+   *
+   * The bracket is not re-entrant (`#applying` is a flag, not a counter),
+   * which is sound: the guest cannot call one of these imports while its
+   * own mutation batch is being applied — during application it is parked
+   * in the stream-write rendezvous, not executing. */
+  function bracketed<A extends unknown[]>(fn: (...args: A) => boolean): (...args: A) => boolean {
+    return (...args: A) => {
+      gate.beginApply();
+      try {
+        return fn(...args);
+      } finally {
+        gate.endApply();
+      }
+    };
+  }
+
+  return {
+    getScrollOffset: wrapped.getScrollOffset,
+    getScrollSize: wrapped.getScrollSize,
+    getClientRect: wrapped.getClientRect,
+    scrollTo: bracketed(wrapped.scrollTo),
+    scroll: bracketed(wrapped.scroll),
+    setFocus: bracketed(wrapped.setFocus),
   };
 }
 
@@ -333,6 +406,15 @@ export function createDomImports(applier: DomApplier, gate: DispatchGate) {
  * asynchronously through `onError`.
  */
 export async function mountApp(opts: MountOptions): Promise<Mounted> {
+  // INTERCEPTORS DO NOT GRANT (intercept.ts header): `intercept.eval` on a
+  // mount that did not also set `eval: true` is a configuration error, not
+  // a way in. Thrown synchronously, before any instantiation is attempted.
+  if (opts.intercept?.eval && !opts.eval) {
+    throw new Error(
+      "mountApp: intercept.eval given without eval: true — interceptors do not grant capabilities",
+    );
+  }
+
   const dispatcher = new EventDispatcher(opts.root, (elementId, nameId, name, ev) => {
     dispatchEvent(elementId, nameId, name, ev);
   });
@@ -397,6 +479,16 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     gate.dispatch(() => handleEventExport!(elementId, nameId, payload, domEvent));
   }
 
+  const doc = opts.root.ownerDocument;
+  const historyProvider: HistoryProvider = opts.history === "fragment"
+    ? fragmentHistory(
+      globalThis.window ??
+        (() => {
+          throw new Error("mountApp: history: \"fragment\" requires globalThis.window");
+        })(),
+    )
+    : memoryHistory();
+
   const imports = {
     // WASI p2 providers. Guest components are built for wasm32-wasip2,
     // which links wasi-libc and therefore imports wasi:cli/io/clocks/random
@@ -411,14 +503,25 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     // (contract:"Resources"); `dom`'s items are functions, named by their
     // bindgen-emitted lowerCamel names.
     "polymorph:dioxus/events@0.6.0": { DomEvent },
-    "polymorph:dioxus/dom@0.6.0": createDomImports(applier, gate),
+    "polymorph:dioxus/dom@0.6.0": createDomImports(applier, gate, opts.intercept?.dom),
+    // Unconditional imports (wit `world app`): every component gets these,
+    // eval feature or not.
+    "polymorph:dioxus/head@0.6.0": createHeadImports(
+      doc,
+      gate,
+      { allowScript: !!opts.eval },
+      opts.intercept?.head,
+    ),
+    "polymorph:dioxus/history@0.6.0": createHistoryImports(historyProvider, opts.intercept?.history),
     // Present only when the caller opted in (`MountOptions.eval` doc
     // above). Absent otherwise — the world's `import eval` still exists
     // in every `app`-world component, but wit-component only encodes the
     // interfaces the guest's core module actually imports, so a
     // non-`eval`-feature build never asks for this key and its absence
     // here is never noticed.
-    ...(opts.eval ? { "polymorph:dioxus/eval@0.6.0": createEvalImports(gate) } : {}),
+    ...(opts.eval
+      ? { "polymorph:dioxus/eval@0.6.0": createEvalImports(gate, opts.intercept?.eval) }
+      : {}),
   };
 
   const instance = await instantiate(opts.source, imports);
@@ -481,6 +584,7 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
   const mounted: Mounted = {
     applier,
     dispatcher,
+    history: historyProvider,
     dispatch(targetEl, name, ev) {
       dispatcher.dispatchTo(targetEl, name, ev);
     },

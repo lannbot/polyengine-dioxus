@@ -17,20 +17,24 @@
 //!
 //! An application crate wires itself up with [`launch!`].
 //!
-//! Under the optional `eval` feature, `document` (wasm32 only) adds the
-//! `Document` provider backing `document::eval` over the world's opt-in
-//! `eval` interface.
+//! `document` and `history` (wasm32 only) are the `dioxus_document::Document`
+//! and `dioxus_history::History` providers over the world's `head` and
+//! `history` interfaces, both unconditional. Under the optional `eval`
+//! feature `document` additionally backs `document::eval` over the world's
+//! opt-in `eval` interface.
 
 pub mod hydrate;
 pub mod interner;
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings;
-#[cfg(all(target_arch = "wasm32", feature = "eval"))]
+#[cfg(target_arch = "wasm32")]
 pub mod document;
 #[cfg(target_arch = "wasm32")]
 pub mod driver;
 #[cfg(target_arch = "wasm32")]
 pub mod events;
+#[cfg(target_arch = "wasm32")]
+pub mod history;
 #[cfg(target_arch = "wasm32")]
 pub mod writer;

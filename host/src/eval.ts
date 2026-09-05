@@ -30,57 +30,22 @@
 
 import type { Stream } from "@deltic/protocol";
 import type { DispatchGate } from "./dispatch.ts";
+import { closedChannel, OutChannel } from "./channel.ts";
+import { type Interceptors, wrap } from "./intercept.ts";
 
 /** wit `eval.error` variant payload shapes (contract:"Value mapping",
- * `variant` row: `{ kind, value }`). */
-type EvalError =
+ * `variant` row: `{ kind, value }`). `denied` carries no payload —
+ * the interceptor's decision, not a message — so it lifts as `{ kind:
+ * "denied" }` alone (payload-less variant case, same shape as
+ * `render-mode.fresh` in host.ts). */
+export type EvalError =
   | { kind: "invalid-js"; value: string }
-  | { kind: "communication"; value: string };
+  | { kind: "communication"; value: string }
+  | { kind: "denied" };
 
 /** wit `result<string, error>` as a VALUE (contract:"Value mapping") —
  * never thrown, never a rejected promise. */
-type EvalResult = { kind: "ok"; value: string } | { kind: "err"; value: EvalError };
-
-/**
- * A one-element-at-a-time outgoing channel, exposed only as `AsyncIterable`
- * — one of the "natural JS producers" a `stream<T>` return accepts
- * (contract cited above), so the runtime's own lowering does the pumping
- * and this file needs no component-model stream handle at all for its
- * OUTGOING direction. `push` satisfies the oldest parked reader or queues;
- * `close` ends iteration for good.
- */
-class OutChannel {
-  #queued: string[] = [];
-  #waiting: Array<(r: IteratorResult<string>) => void> = [];
-  #closed = false;
-
-  push(v: string): void {
-    const w = this.#waiting.shift();
-    if (w) w({ value: v, done: false });
-    else this.#queued.push(v);
-  }
-
-  close(): void {
-    this.#closed = true;
-    for (const w of this.#waiting.splice(0)) {
-      w({ value: undefined, done: true } as IteratorResult<string>);
-    }
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<string> {
-    return {
-      next: (): Promise<IteratorResult<string>> => {
-        if (this.#queued.length > 0) {
-          return Promise.resolve({ value: this.#queued.shift()!, done: false });
-        }
-        if (this.#closed) {
-          return Promise.resolve({ value: undefined, done: true } as IteratorResult<string>);
-        }
-        return new Promise((resolve) => this.#waiting.push(resolve));
-      },
-    };
-  }
-}
+export type EvalResult = { kind: "ok"; value: string } | { kind: "err"; value: EvalError };
 
 /** `JSON.stringify` returns `undefined` for values it can't represent as a
  * top-level JSON text (a bare `undefined`/function/symbol), which the wit
@@ -99,12 +64,27 @@ function stringifyOrNull(v: unknown): string {
  * can be unit-tested against a bare `DispatchGate`, with no component in
  * the loop (host/tests/eval_test.ts).
  */
-export function createEvalImports(gate: DispatchGate) {
+export interface EvalImports {
+  eval(js: string, send: Stream<string>): [AsyncIterable<string>, Promise<EvalResult>];
+  // deno-lint-ignore no-explicit-any
+  [key: string]: (...args: any[]) => any;
+}
+
+/** The denial helper an `intercept.eval.eval` interceptor returns to refuse
+ * a script outright: a closed stream (no values ever) and a future that
+ * resolves `err denied` immediately (wit `eval.error.denied`) — the same
+ * `EvalError::Unsupported` degrade a `NoOpDocument` host gives, so a
+ * refused eval looks to guest code exactly like no eval at all. */
+export function evalDenied(): [AsyncIterable<string>, Promise<EvalResult>] {
+  return [closedChannel<string>(), Promise.resolve({ kind: "err", value: { kind: "denied" } })];
+}
+
+export function createEvalImports(gate: DispatchGate, interceptors?: Interceptors<EvalImports>) {
   function evaluate(
     js: string,
     send: Stream<string>,
   ): [AsyncIterable<string>, Promise<EvalResult>] {
-    const out = new OutChannel();
+    const out = new OutChannel<string>();
 
     let body: (dioxus: unknown) => Promise<unknown>;
     try {
@@ -139,14 +119,11 @@ export function createEvalImports(gate: DispatchGate) {
     // calling guest's stack — so it is bracketed by the host's dispatch
     // gate like `dom.set-focus` is" (dispatch.ts window 3): this call
     // synchronously runs everything up to the script's first `await`, and
-    // that prefix can mutate the DOM / fire delegated events.
-    gate.beginApply();
-    let p: Promise<unknown>;
-    try {
-      p = body(dioxusObj);
-    } finally {
-      gate.endApply();
-    }
+    // that prefix can mutate the DOM / fire delegated events. The bracket
+    // itself lives in `createEvalImports`'s outer wrapper, around the
+    // whole (possibly-intercepted) call — see intercept.ts, "THE GATE
+    // BRACKET IS OUTSIDE THE INTERCEPTOR".
+    const p: Promise<unknown> = body(dioxusObj);
 
     // The host MUST write the future (wit doc), even for a script that
     // never completes before the mount tears down — but this promise
@@ -178,5 +155,16 @@ export function createEvalImports(gate: DispatchGate) {
     return [out, outcome];
   }
 
-  return { eval: evaluate };
+  const wrapped = wrap({ eval: evaluate }, interceptors);
+
+  return {
+    eval(js: string, send: Stream<string>): [AsyncIterable<string>, Promise<EvalResult>] {
+      gate.beginApply();
+      try {
+        return wrapped.eval(js, send);
+      } finally {
+        gate.endApply();
+      }
+    },
+  };
 }
