@@ -11,7 +11,157 @@
 // flags -> object of booleans (absent = false is accepted on lower, so we
 // omit false-valued flags — contract "flags" row, lower direction).
 
+import { ComponentException } from "@deltic/protocol";
+
 import type { ListenerDelegate } from "./applier.ts";
+
+/** Duck type for a native `File` — linkedom (the host unit-test DOM) has no
+ * `File`/`Blob`, so tests fake this shape. `stream`/`arrayBuffer` are both
+ * optional: `HostFile.read()` prefers `stream()` and falls back to
+ * `arrayBuffer()` (see its doc comment for which shape the runtime
+ * actually accepted end-to-end). */
+export interface FileLike {
+  name: string;
+  size: number;
+  lastModified: number;
+  type: string;
+  stream?(): ReadableStream<Uint8Array>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+}
+
+/** Host-implemented `events.file` resource (contracts/embedder-api.md
+ * "Resources": "the host provides a plain class implementing the
+ * bindgen-emitted interface"). One instance per selected/dropped file;
+ * constructed at payload-capture time (`formData`/the drag family below),
+ * before the event is queued. */
+export class HostFile {
+  #file: FileLike;
+
+  constructor(file: FileLike) {
+    this.#file = file;
+  }
+
+  name(): string {
+    return this.#file.name;
+  }
+
+  /** wit `size: func() -> u64` — lowers as `bigint` (contract "Value
+   * mapping", `u64` row). */
+  size(): bigint {
+    return BigInt(this.#file.size);
+  }
+
+  /** wit `last-modified: func() -> u64` (`File.lastModified`, ms since the
+   * Unix epoch) — same bigint requirement as `size`. */
+  lastModified(): bigint {
+    return BigInt(this.#file.lastModified);
+  }
+
+  /** `none` when the browser reports "" (wit doc: "`none` when it reports
+   * ""). */
+  contentType(): string | undefined {
+    return this.#file.type === "" ? undefined : this.#file.type;
+  }
+
+  /** wit `read: func() -> stream<u8>`. Contract "Lowering accepts the
+   * natural JS producers": a `ReadableStream` is one of the accepted
+   * shapes, so `File.stream()` is passed straight through when available;
+   * an `AsyncIterable` built from `arrayBuffer()` is the fallback for a
+   * `FileLike` that only implements that (verified end-to-end against the
+   * runtime — see the track report for which shape actually worked). */
+  read(): ReadableStream<Uint8Array> | AsyncIterable<Uint8Array> {
+    if (typeof this.#file.stream === "function") return this.#file.stream();
+    const arrayBuffer = this.#file.arrayBuffer?.bind(this.#file);
+    if (!arrayBuffer) {
+      // Neither producer available: an empty read rather than a throw —
+      // consistent with every other family's defensive-degrade convention
+      // in this file.
+      return (async function* () {})();
+    }
+    return (async function* () {
+      const buf = await arrayBuffer();
+      yield new Uint8Array(buf);
+    })();
+  }
+}
+
+/** Duck type for a native `DataTransfer` — linkedom has no drag/drop
+ * support at all, so tests fake this shape. Mirrors dioxus-web's own
+ * `NativeDataTransfer` (dioxus-html-0.7.10 src/data_transfer.rs) closely
+ * enough that a real `DataTransfer` satisfies it as-is. */
+export interface DataTransferLike {
+  getData(format: string): string;
+  setData(format: string, data: string): void;
+  clearData(format?: string): void;
+  effectAllowed: string;
+  dropEffect: string;
+  files?: ArrayLike<FileLike>;
+}
+
+/** Host-implemented `events.data-transfer` resource. One instance per drag
+ * event that has a `dataTransfer` (wit `drag-data.transfer`: `option<own<
+ * data-transfer>>`, `none` for a synthetic event with none). */
+export class HostDataTransfer {
+  #dt: DataTransferLike;
+
+  constructor(dt: DataTransferLike) {
+    this.#dt = dt;
+  }
+
+  /** wit doc: "`none` for an absent format (or protected mode)". The DOM's
+   * `getData` returns `""` for BOTH an absent format and an empty stored
+   * value — dioxus-web's own `get_data` returns `Some("")` in both cases
+   * (dioxus-html-0.7.10 src/data_transfer.rs:28 has no absent-vs-empty
+   * distinction either), so this mirrors that rather than inventing one:
+   * only a thrown DOM access (protected-mode-style refusal) becomes
+   * `undefined`. */
+  getData(format: string): string | undefined {
+    try {
+      return this.#dt.getData(format);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** wit `result<_, string>` — err becomes a branded throw (contract
+   * "Error model": "Host import with `result<T, E>`: … `throw`s `new
+   * ComponentException(payload)` for err"). */
+  setData(format: string, data: string): void {
+    try {
+      this.#dt.setData(format, data);
+    } catch (e) {
+      throw new ComponentException(String(e));
+    }
+  }
+
+  clearData(format?: string): void {
+    try {
+      this.#dt.clearData(format);
+    } catch (e) {
+      throw new ComponentException(String(e));
+    }
+  }
+
+  effectAllowed(): string {
+    return this.#dt.effectAllowed;
+  }
+
+  setEffectAllowed(effect: string): void {
+    this.#dt.effectAllowed = effect;
+  }
+
+  dropEffect(): string {
+    return this.#dt.dropEffect;
+  }
+
+  setDropEffect(effect: string): void {
+    this.#dt.dropEffect = effect;
+  }
+
+  files(): HostFile[] {
+    return Array.from(this.#dt.files ?? [], (f) => new HostFile(f));
+  }
+}
 
 /** Minimal native-event surface we depend on; duck-typeable in tests. */
 export interface NativeEventLike {
@@ -60,6 +210,8 @@ export interface NativeEventLike {
   // form
   value?: string;
   checked?: boolean;
+  // drag (DragEvent.dataTransfer — absent for a synthetic event)
+  dataTransfer?: DataTransferLike;
   // scroll (read off currentTarget/target normally; see #scrollData)
   // composition (CompositionEvent.data)
   data?: string;
@@ -209,14 +361,16 @@ function isPointerEvent(name: string): boolean {
 
 // dioxus-html-0.7.10 generated.rs Drag(DragData) events= list (the
 // `#[convert = convert_drag_data]` block at generated.rs:39-50, immediately
-// above `Focus(FocusData)`). DragData implements HasMouseData (dioxus-html src/events/
-// drag.rs), and DOM drag events ARE MouseEvents (clientX/clientY/button/
-// buttons/modifiers), so these route to the existing `mouse` family rather
-// than a dedicated `drag` payload — src/events.rs's `Drag(wit::MouseData)`
-// adapter is the guest-side half of this. None of these names collide with
-// `isPointerEvent`'s `pointer`-prefix test or with MOUSE_EVENTS/
-// EXTRA_POINTER_EVENTS above (in particular, `drop` does not start with
-// "drag" and isn't a pointer/mouse event name already claimed elsewhere).
+// above `Focus(FocusData)`). DragData implements HasMouseData (dioxus-html
+// src/events/drag.rs) plus HasDragData (data_transfer), so these route to
+// the dedicated `drag` payload (wit/world.wit `drag-data { mouse,
+// transfer }`) — wit/world.wit:160-167 and src/events.rs's `Drag`
+// adapter are the guest-side half of this; DRAG_EVENTS previously routed to
+// `mouse` before `drag-data`/`data-transfer` existed (see wit/world.wit:161
+// doc comment). None of these names collide with `isPointerEvent`'s
+// `pointer`-prefix test or with MOUSE_EVENTS/EXTRA_POINTER_EVENTS above (in
+// particular, `drop` does not start with "drag" and isn't a pointer/mouse
+// event name already claimed elsewhere).
 const DRAG_EVENTS = new Set([
   "drag",
   "dragend",
@@ -303,6 +457,16 @@ function wheelData(ev: NativeEventLike) {
   };
 }
 
+function dragData(ev: NativeEventLike) {
+  return {
+    mouse: mouseData(ev),
+    // wit `option<own<data-transfer>>` -> `HostDataTransfer | undefined`;
+    // `none` when the event has no `dataTransfer` (a synthetic event).
+    // Instance created here, at capture time, mirroring `formData`'s files.
+    transfer: ev.dataTransfer ? new HostDataTransfer(ev.dataTransfer) : undefined,
+  };
+}
+
 /** Collect FormData-shaped entries for a submit-like target. Faithful when
  * the target is a real `<form>` (or linkedom's faithful-enough analogue);
  * defensively degrades to an empty list otherwise (see events_test.ts for
@@ -347,7 +511,12 @@ function formData(name: string, ev: NativeEventLike) {
   // target-first order; this brings the sibling `target` const in line
   // with it.
   const target = (ev.target ?? ev.currentTarget) as
-    | (EventTarget & { value?: string; checked?: boolean; type?: string })
+    | (EventTarget & {
+      value?: string;
+      checked?: boolean;
+      type?: string;
+      files?: ArrayLike<FileLike>;
+    })
     | null
     | undefined;
   const checked = typeof (ev.checked ?? target?.checked) === "boolean"
@@ -365,7 +534,12 @@ function formData(name: string, ev: NativeEventLike) {
     ? String(checked ?? false)
     : str(ev.value ?? target?.value);
   const values = name === "submit" ? formValues(ev.target ?? ev.currentTarget) : [];
-  return { value, checked, values };
+  // wit form-data.files: list<own<file>>, the control's selected files
+  // (`<input type=file>`), empty otherwise. Instances are created HERE, at
+  // capture time — before the event is queued (dispatch gate) — same
+  // rationale as the drag family's `HostDataTransfer` below.
+  const files = Array.from(target?.files ?? [], (f) => new HostFile(f));
+  return { value, checked, values, files };
 }
 
 function scrollData(ev: NativeEventLike) {
@@ -548,7 +722,7 @@ function visibleData(ev: NativeEventLike) {
 export function serializePayload(name: string, ev: NativeEventLike): unknown {
   if (isPointerEvent(name)) return { kind: "pointer", value: pointerData(ev) };
   if (MOUSE_EVENTS.has(name)) return { kind: "mouse", value: mouseData(ev) };
-  if (DRAG_EVENTS.has(name)) return { kind: "mouse", value: mouseData(ev) };
+  if (DRAG_EVENTS.has(name)) return { kind: "drag", value: dragData(ev) };
   if (KEYBOARD_EVENTS.has(name)) return { kind: "keyboard", value: keyboardData(ev) };
   if (name === "wheel") return { kind: "wheel", value: wheelData(ev) };
   if (FORM_EVENTS.has(name)) return { kind: "form", value: formData(name, ev) };

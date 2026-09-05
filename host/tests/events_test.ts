@@ -1,6 +1,6 @@
 import { assertEquals } from "jsr:@std/assert@1";
 import { parseHTML } from "linkedom";
-import { EventDispatcher, serializePayload } from "../src/events.ts";
+import { EventDispatcher, HostDataTransfer, HostFile, serializePayload } from "../src/events.ts";
 
 function makeRoot() {
   const { document } = parseHTML("<!doctype html><html><body><div id=root></div></body></html>");
@@ -373,7 +373,7 @@ Deno.test("serializePayload: form family — input/change read value/checked off
   input.checked = true;
 
   const payload = serializePayload("input", { type: "input", target: input as unknown as EventTarget });
-  assertEquals(payload, { kind: "form", value: { value: "hello", checked: true, values: [] } });
+  assertEquals(payload, { kind: "form", value: { value: "hello", checked: true, values: [], files: [] } });
 });
 
 Deno.test("serializePayload: checkbox folds checked into value (dioxus FormData::checked derivation)", () => {
@@ -385,14 +385,14 @@ Deno.test("serializePayload: checkbox folds checked into value (dioxus FormData:
     type: "change",
     target: checkbox as unknown as EventTarget,
   });
-  assertEquals(payload, { kind: "form", value: { value: "true", checked: true, values: [] } });
+  assertEquals(payload, { kind: "form", value: { value: "true", checked: true, values: [], files: [] } });
 
   const unchecked = { type: "checkbox", value: "on", checked: false };
   const payload2 = serializePayload("change", {
     type: "change",
     target: unchecked as unknown as EventTarget,
   });
-  assertEquals(payload2, { kind: "form", value: { value: "false", checked: false, values: [] } });
+  assertEquals(payload2, { kind: "form", value: { value: "false", checked: false, values: [], files: [] } });
 });
 
 Deno.test("serializePayload: submit collects FormData-shaped entries from the target form", () => {
@@ -463,10 +463,10 @@ Deno.test("serializePayload: previously-misclassified names map to their real fa
 
 // dioxus-html-0.7.10 generated.rs Drag(DragData) events= list: drag, dragend,
 // dragenter, dragexit, dragleave, dragover, dragstart, drop. DragData
-// implements HasMouseData, and DOM drag events are MouseEvents, so these
-// route to the `mouse` family (src/events.rs's `Drag(wit::MouseData)`
-// adapter is the guest-side half of this).
-Deno.test("serializePayload: drag family serializes as mouse (dnd reorder needs client-y)", () => {
+// implements HasMouseData plus HasDragData, so these route to the
+// dedicated `drag` payload (wit/world.wit `drag-data { mouse, transfer }`
+// — src/events.rs's `Drag` adapter is the guest-side half of this).
+Deno.test("serializePayload: drag family serializes as drag (dnd reorder needs client-y)", () => {
   const payload = serializePayload("dragover", {
     type: "dragover",
     clientX: 30,
@@ -474,26 +474,44 @@ Deno.test("serializePayload: drag family serializes as mouse (dnd reorder needs 
     button: 0,
     buttons: 1,
     altKey: true,
-  }) as { kind: string; value: Record<string, unknown> };
-  assertEquals(payload, {
-    kind: "mouse",
-    value: {
-      clientX: 30,
-      clientY: 40,
-      pageX: 0,
-      pageY: 0,
-      screenX: 0,
-      screenY: 0,
-      offsetX: 0,
-      offsetY: 0,
-      button: 0,
-      buttons: 1,
-      mods: { alt: true },
-    },
+  }) as { kind: string; value: { mouse: Record<string, unknown>; transfer: unknown } };
+  assertEquals(payload.kind, "drag");
+  assertEquals(payload.value.mouse, {
+    clientX: 30,
+    clientY: 40,
+    pageX: 0,
+    pageY: 0,
+    screenX: 0,
+    screenY: 0,
+    offsetX: 0,
+    offsetY: 0,
+    button: 0,
+    buttons: 1,
+    mods: { alt: true },
   });
+  // No `dataTransfer` on this synthesized event: `option<own<data-
+  // transfer>>` -> `undefined`.
+  assertEquals(payload.value.transfer, undefined);
 });
 
-Deno.test("serializePayload: every drag-family name maps to mouse", () => {
+Deno.test("serializePayload: drag payload carries a HostDataTransfer instance when the native event has one", () => {
+  const dt = {
+    getData: () => "",
+    setData: () => {},
+    clearData: () => {},
+    effectAllowed: "all",
+    dropEffect: "none",
+    files: [],
+  };
+  const payload = serializePayload("drop", {
+    type: "drop",
+    dataTransfer: dt,
+  }) as { kind: string; value: { transfer: unknown } };
+  assertEquals(payload.kind, "drag");
+  assertEquals(payload.value.transfer instanceof HostDataTransfer, true);
+});
+
+Deno.test("serializePayload: every drag-family name maps to drag", () => {
   const kindOf = (name: string) => (serializePayload(name, { type: name }) as { kind: string }).kind;
   for (
     const name of [
@@ -507,7 +525,7 @@ Deno.test("serializePayload: every drag-family name maps to mouse", () => {
       "drop",
     ]
   ) {
-    assertEquals(kindOf(name), "mouse", `${name} should map to mouse`);
+    assertEquals(kindOf(name), "drag", `${name} should map to drag`);
   }
 });
 
@@ -1072,4 +1090,134 @@ Deno.test("resize: observer callback dispatches through the sink with the entry 
   } finally {
     delete g.ResizeObserver;
   }
+});
+
+// -- HostFile / HostDataTransfer / form files --------------------------------
+
+Deno.test("serializePayload: form family carries HostFile instances for target.files", () => {
+  const fakeFile = { name: "a.txt", size: 5, lastModified: 5, type: "text/plain" };
+  const input = { type: "file", value: "", files: [fakeFile] };
+  const payload = serializePayload("change", {
+    type: "change",
+    target: input as unknown as EventTarget,
+  }) as { kind: string; value: { files: HostFile[] } };
+  assertEquals(payload.kind, "form");
+  assertEquals(payload.value.files.length, 1);
+  assertEquals(payload.value.files[0] instanceof HostFile, true);
+  assertEquals(payload.value.files[0].name(), "a.txt");
+});
+
+Deno.test("HostFile: metadata is bigint-typed and content-type undefined for ''", () => {
+  const f = new HostFile({ name: "x.bin", size: 42, lastModified: 1000, type: "" });
+  assertEquals(f.name(), "x.bin");
+  assertEquals(f.size(), 42n);
+  assertEquals(typeof f.size(), "bigint");
+  assertEquals(f.lastModified(), 1000n);
+  assertEquals(f.contentType(), undefined);
+});
+
+Deno.test("HostFile: read() yields the bytes of a real File via stream()", async () => {
+  const bytes = new TextEncoder().encode("hello");
+  const file = new File([bytes], "a.txt", { type: "text/plain", lastModified: 5 });
+  const hf = new HostFile(file);
+  const produced = hf.read();
+  assertEquals(typeof (produced as ReadableStream<Uint8Array>).getReader, "function");
+  const reader = (produced as ReadableStream<Uint8Array>).getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  assertEquals(new TextDecoder().decode(out), "hello");
+});
+
+Deno.test("HostFile: read() falls back to an AsyncIterable when stream() is absent", async () => {
+  const bytes = new TextEncoder().encode("world");
+  const hf = new HostFile({
+    name: "b.txt",
+    size: bytes.length,
+    lastModified: 0,
+    type: "text/plain",
+    arrayBuffer: () => Promise.resolve(bytes.buffer as ArrayBuffer),
+  });
+  const produced = hf.read() as AsyncIterable<Uint8Array>;
+  const chunks: Uint8Array[] = [];
+  for await (const chunk of produced) chunks.push(chunk);
+  const total = chunks.reduce((n, c) => n + c.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  assertEquals(new TextDecoder().decode(out), "world");
+});
+
+Deno.test("HostDataTransfer: getData/setData/clearData/effectAllowed/dropEffect/files", () => {
+  const store = new Map<string, string>();
+  const dt = new HostDataTransfer({
+    getData: (f) => store.get(f) ?? "",
+    setData: (f, d) => {
+      store.set(f, d);
+    },
+    clearData: (f) => {
+      if (f === undefined) store.clear();
+      else store.delete(f);
+    },
+    effectAllowed: "all",
+    dropEffect: "none",
+    files: [{ name: "c.txt", size: 1, lastModified: 0, type: "" }],
+  });
+  assertEquals(dt.getData("text/plain"), "");
+  dt.setData("text/plain", "hi");
+  assertEquals(dt.getData("text/plain"), "hi");
+  dt.clearData("text/plain");
+  assertEquals(dt.getData("text/plain"), "");
+  assertEquals(dt.effectAllowed(), "all");
+  assertEquals(dt.dropEffect(), "none");
+  const files = dt.files();
+  assertEquals(files.length, 1);
+  assertEquals(files[0] instanceof HostFile, true);
+});
+
+Deno.test("HostDataTransfer: setData/clearData throw ComponentException when the native call throws", () => {
+  const dt = new HostDataTransfer({
+    getData: () => {
+      throw new Error("protected mode");
+    },
+    setData: () => {
+      throw new Error("not allowed");
+    },
+    clearData: () => {
+      throw new Error("not allowed");
+    },
+    effectAllowed: "none",
+    dropEffect: "none",
+  });
+  // A thrown DOM access on getData becomes `undefined` (option<T>), not a
+  // throw — see HostDataTransfer.getData's doc comment.
+  assertEquals(dt.getData("text/plain"), undefined);
+  let threw = false;
+  try {
+    dt.setData("text/plain", "x");
+  } catch (e) {
+    threw = true;
+    assertEquals((e as { payload?: unknown }).payload, "Error: not allowed");
+  }
+  assertEquals(threw, true);
+  threw = false;
+  try {
+    dt.clearData();
+  } catch {
+    threw = true;
+  }
+  assertEquals(threw, true);
 });

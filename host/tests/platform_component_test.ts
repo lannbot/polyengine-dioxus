@@ -226,3 +226,75 @@ Deno.test("platform-probe: an eval interceptor can deny a specific script, mappe
     delete (globalThis as Record<string, unknown>).__evalProbe;
   }
 });
+
+Deno.test("platform-probe: file input change reads name/size/content-type/contents", async () => {
+  const { root } = makeRoot();
+  try {
+    const mounted = await mount(root);
+    const fileInput = root.querySelector(".file")! as unknown as {
+      value: string;
+      files: File[];
+    };
+    const files_ = root.querySelector(".files")!;
+
+    const f = new File(["hello"], "a.txt", { type: "text/plain" });
+    fileInput.value = "";
+    fileInput.files = [f];
+
+    mounted.dispatch(fileInput as unknown as Element, "change", {
+      type: "change",
+      target: fileInput as unknown as EventTarget,
+      value: "",
+    });
+
+    await waitFor(() => files_.textContent === "a.txt:5:text/plain:hello:5", "file read");
+
+    mounted.dispose();
+  } finally {
+    delete (globalThis as Record<string, unknown>).__evalProbe;
+  }
+});
+
+function fakeDataTransfer(initialFiles: File[] = []) {
+  const store = new Map<string, string>();
+  return {
+    getData(format: string) {
+      return store.get(format) ?? "";
+    },
+    setData(format: string, data: string) {
+      store.set(format, data);
+    },
+    clearData(format?: string) {
+      if (format === undefined) store.clear();
+      else store.delete(format);
+    },
+    effectAllowed: "all",
+    dropEffect: "none",
+    files: initialFiles,
+  };
+}
+
+Deno.test("platform-probe: dragstart sets data, drop reads it back plus file count", async () => {
+  const { root } = makeRoot();
+  try {
+    const mounted = await mount(root);
+    const dropTarget = root.querySelector(".drop")!;
+    const dropped = () => root.querySelector(".dropped")!;
+
+    const dt = fakeDataTransfer([]);
+    mounted.dispatch(dropTarget, "dragstart", { type: "dragstart", dataTransfer: dt });
+    mounted.dispatch(dropTarget, "drop", { type: "drop", dataTransfer: dt });
+
+    await waitFor(() => dropped()?.textContent === "from-guest:0", "drop with no files");
+
+    const dt2 = fakeDataTransfer([new File(["x"], "b.txt")]);
+    mounted.dispatch(dropTarget, "dragstart", { type: "dragstart", dataTransfer: dt2 });
+    mounted.dispatch(dropTarget, "drop", { type: "drop", dataTransfer: dt2 });
+
+    await waitFor(() => dropped()?.textContent === "from-guest:1", "drop with one file");
+
+    mounted.dispose();
+  } finally {
+    delete (globalThis as Record<string, unknown>).__evalProbe;
+  }
+});

@@ -17,8 +17,8 @@ package polymorph:dioxus@0.6.0;
 /// Typed event payloads, host-serialized at dispatch. One snapshot per
 /// event; fields not applicable to an event family are simply absent by
 /// construction (the family is chosen host-side by event name, mirroring
-/// dioxus-html's name→data-type mapping). Drag events reuse the `mouse`
-/// family (DOM drag events are MouseEvents). Some families dispatch as
+/// dioxus-html's name→data-type mapping). Drag events are `mouse` data plus
+/// a live `data-transfer` handle (`drag-data`). Some families dispatch as
 /// `empty` because there is nothing to carry: focus, cancel, clipboard,
 /// media, selection and toggle events have data types in dioxus-html that
 /// expose no accessors at all, so a handler can observe nothing beyond the
@@ -105,6 +105,65 @@ interface events {
     /// Form entries, populated for submit-shaped events on a form element
     /// (name → values, multi-valued controls preserved).
     values: list<tuple<string, list<string>>>,
+    /// The control's selected files (`<input type=file>`), empty otherwise.
+    /// Owned handles: the guest keeps them as long as its `FileData`
+    /// values live, and may read them after the dispatch has completed.
+    files: list<own<file>>,
+  }
+
+  /// One file the user handed the page — a form control's selection or a
+  /// drop. The back end of dioxus-html's `FileData` (dioxus-html-0.7.10
+  /// src/file_data.rs, `NativeFileData`). Metadata is synchronous, as the
+  /// DOM's is; contents arrive as a byte stream because reading a `File`
+  /// is asynchronous in every browser API, and dioxus's `read_bytes` /
+  /// `read_string` / `byte_stream` are all async on their side too.
+  ///
+  /// A file is only ever reachable through an event the USER caused
+  /// (choosing files, dropping them), so this carries no policy of its own;
+  /// an embedder that wants one intercepts `read` (`MountOptions.intercept`
+  /// does not yet reach resources — see host/src/intercept.ts).
+  resource file {
+    name: func() -> string;
+    /// Bytes.
+    size: func() -> u64;
+    /// Milliseconds since the Unix epoch (`File.lastModified`).
+    last-modified: func() -> u64;
+    /// The MIME type the browser reports, `none` when it reports "".
+    content-type: func() -> option<string>;
+    /// The file's contents, start to end. Each call starts a fresh read.
+    read: func() -> stream<u8>;
+  }
+
+  /// A drag operation's live `DataTransfer`: the back end of dioxus-html's
+  /// `DataTransfer` (dioxus-html-0.7.10 src/data_transfer.rs,
+  /// `NativeDataTransfer`). A RESOURCE, not a snapshot, because the setters
+  /// only mean anything against the live object during `dragstart`, and
+  /// the browser's protected mode makes `get-data` answer `none` outside
+  /// `dragstart`/`drop` — behavior dioxus-web's users already know, and
+  /// which a snapshot would have to fake. Owned by the guest; methods called
+  /// after the dispatch completed see whatever the browser still exposes.
+  resource data-transfer {
+    /// `getData(format)`; `none` for an absent format (or protected mode).
+    get-data: func(format: string) -> option<string>;
+    /// `setData`. Errs when the browser refuses (outside `dragstart`).
+    set-data: func(format: string, data: string) -> result<_, string>;
+    /// `clearData(format?)`. Errs as `set-data`.
+    clear-data: func(format: option<string>) -> result<_, string>;
+    effect-allowed: func() -> string;
+    set-effect-allowed: func(effect: string);
+    drop-effect: func() -> string;
+    set-drop-effect: func(effect: string);
+    /// `DataTransfer.files`, as owned handles (see `file`).
+    files: func() -> list<own<file>>;
+  }
+
+  /// Drag events (`dragstart`..`drop`): a `MouseEvent` plus its
+  /// `dataTransfer`. Drag events reused the `mouse` family before this
+  /// record existed; they now route here.
+  record drag-data {
+    mouse: mouse-data,
+    /// `none` when the event has no `dataTransfer` (a synthetic event).
+    transfer: option<own<data-transfer>>,
   }
 
   record scroll-data {
@@ -264,6 +323,7 @@ interface events {
     /// mouse — see family mapping in the host).
     empty,
     mouse(mouse-data),
+    drag(drag-data),
     pointer(pointer-data),
     keyboard(keyboard-data),
     wheel(wheel-data),
