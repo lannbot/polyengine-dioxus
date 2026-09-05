@@ -580,43 +580,45 @@ interface dom {
 /// - The script runs in the host's realm with whatever that realm can reach —
 ///   `document`, `window`, the mount root. That is the point, and the reason
 ///   for the opt-in.
+///
+/// One script is one call. Its channels are component-model streams and its
+/// completion a future, so every lifetime question has the CABI's answer
+/// rather than one of ours: "no more values" is the stream closing, "already
+/// completed" cannot be asked twice of a future, and an evaluation nobody
+/// awaits is a dropped reader the host's eventual write sees as `dropped`.
+/// A subtask-based design was tried first and retired: polyengine#280 loses a
+/// subtask whose settlement lands in the microtask checkpoint after its
+/// export's initial activation returns, and a `handle-event` handler awaiting
+/// an eval hits that every time; future/stream writes take a different path
+/// through the runtime and are unaffected.
 interface eval {
-  /// Why an evaluation could not deliver a value. The cases the host can
-  /// actually produce; the guest maps them onto dioxus-document's
-  /// `EvalError`.
+  /// Why an evaluation could not deliver a value.
   variant error {
     /// The script did not compile (a `SyntaxError` constructing the
-    /// function). Reported by `join` — a constructor cannot fail.
+    /// function).
     invalid-js(string),
     /// The script threw, or a value could not be represented as JSON.
     communication(string),
-    /// The script has completed and nothing more will arrive: `recv` with an
-    /// empty queue after completion, or `join` a second time.
-    finished,
   }
 
-  /// One running script. Construction starts it; the synchronous prefix
-  /// (everything before the script's first `await`) runs INSIDE the
-  /// constructor, on the calling guest's stack — so it is bracketed by the
-  /// host's dispatch gate like `dom.set-focus` is (host/src/dispatch.ts,
-  /// window 3), since that prefix can mutate the DOM and fire delegated
-  /// events. Continuations after an `await` run on their own microtasks,
-  /// outside any guest turn, and need no bracket.
+  /// Start `js`. `send` carries the guest's values (JSON) to the script's
+  /// `await dioxus.recv()`; the returned stream carries the script's
+  /// `dioxus.send(v)` values (JSON) to the guest and closes when the script
+  /// completes; the returned future is the script's completion: its return
+  /// value as JSON, or how it failed.
   ///
-  /// Dropping the handle does not stop the script (nothing could — this is
-  /// a JS promise, not a task); it only releases the host's queues.
-  resource evaluation {
-    constructor(js: string);
-    /// Queue a JSON value for the script's next `await dioxus.recv()`.
-    send: func(json: string);
-    /// The next value the script passed to `dioxus.send`, as JSON. Parks
-    /// until one is available.
-    recv: async func() -> result<string, error>;
-    /// The script's completion: its return value as JSON, or how it failed.
-    join: async func() -> result<string, error>;
-  }
+  /// Synchronous, deliberately: the script's synchronous prefix (everything
+  /// before its first `await`) runs INSIDE this call, on the calling guest's
+  /// stack — so it is bracketed by the host's dispatch gate like
+  /// `dom.set-focus` is (host/src/dispatch.ts, window 3), since that prefix
+  /// can mutate the DOM and fire delegated events. Continuations after an
+  /// `await` run on their own microtasks, outside any guest turn.
+  ///
+  /// The host MUST write the future, even for a script that never completes
+  /// before the host tears the mount down (the CABI forbids dropping an
+  /// unwritten writable future end; the guest's read would trap).
+  eval: func(js: string, send: stream<string>) -> tuple<stream<string>, future<result<string, error>>>;
 }
-
 /// A Dioxus application component. The host instantiates it, calls `run`
 /// once — which returns the mutation stream the app renders through — and
 /// dispatches DOM events via `handle-event`.
