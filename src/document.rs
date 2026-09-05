@@ -19,8 +19,8 @@
 //!
 //! So the owner lives in a slot the evaluator itself holds
 //! (`Rc<RefCell<Option<Owner>>>`, a deliberate reference cycle) and is taken
-//! out — freeing the evaluator, whose `Rc<Evaluation>` drop releases the
-//! host resource — at whichever of these comes first:
+//! out — freeing the evaluator, and with it both of the evaluation's stream
+//! ends — at whichever of these comes first:
 //!
 //! - the script's result arrives and nothing has ever polled the evaluator:
 //!   the fire-and-forget case (`document::eval("document.title = ...")`),
@@ -31,6 +31,11 @@
 //!   `poll_join` while holding a `try_write` guard on the very box the owner
 //!   would free (src/eval.rs:22-27).
 //!
+//! Dropping the evaluator needs no teardown call: the `send` writer closing
+//! is what resolves the script's pending `await dioxus.recv()`, and the
+//! dropped read end is what the host's next write to us reports as
+//! `dropped`.
+//!
 //! An evaluation that is `recv`'d but never joined therefore keeps its owner
 //! for the life of the instance: any poll marks the evaluator as observed,
 //! since an eval a component is still talking to must not be freed out from
@@ -39,7 +44,7 @@
 //!
 //! Once the owner is gone the box is dead and dioxus's own `try_write`/
 //! `try_read` failure path answers `EvalError::Finished` — which is also
-//! what a second `join` gets, matching the WIT's `finished` case.
+//! what a second `join` gets.
 
 use std::cell::RefCell;
 use std::future::Future;
@@ -49,9 +54,10 @@ use std::task::{Context, Poll, Waker};
 
 use dioxus_document::{Document, Eval, EvalError, Evaluator};
 use generational_box::{AnyStorage, GenerationalBox, Owner, UnsyncStorage};
-use wit_bindgen::rt::async_support::spawn_local;
+use wit_bindgen::rt::async_support::{spawn_local, StreamReader, StreamWriter};
 
 use crate::bindings::polymorph::dioxus::eval;
+use crate::bindings::wit_stream;
 
 /// The polyengine document provider, installed as `Rc<dyn Document>` root
 /// context by [`crate::driver::run`] (dioxus-document's `document()` looks it
@@ -80,8 +86,24 @@ type OwnerSlot = Rc<RefCell<Option<Owner<UnsyncStorage>>>>;
 
 type NextRecv = Pin<Box<dyn Future<Output = Result<serde_json::Value, EvalError>>>>;
 
+/// The guest→script half. `Evaluator::send` is synchronous but a stream write
+/// is not, so values are staged here and drained by a spawned task; the
+/// writer is taken for the duration of that drain, mirroring the renderer's
+/// `stream`/`pending` pattern in [`crate::driver`] (at most one write may be
+/// in flight per end).
+struct Sender {
+    /// `None` while a drain owns it, and permanently once the read end is
+    /// gone (the writer is dropped then, closing the stream).
+    writer: Option<StreamWriter<String>>,
+    /// Values staged for the next (or in-flight) drain.
+    pending: Vec<String>,
+}
+
 struct WitEvaluator {
-    handle: Rc<eval::Evaluation>,
+    send: Rc<RefCell<Sender>>,
+    /// The script→guest half, held in a slot so [`WitEvaluator::poll_recv`]'s
+    /// future can move it out across its await and hand it back.
+    recv: Rc<RefCell<Option<StreamReader<String>>>>,
     state: Rc<RefCell<JoinState>>,
     owner: OwnerSlot,
     /// Lazily constructed `recv` future, dropped on completion — dioxus-web's
@@ -91,15 +113,21 @@ struct WitEvaluator {
 
 impl WitEvaluator {
     fn create(js: String) -> GenerationalBox<Box<dyn Evaluator>> {
-        // Construction starts the script: its synchronous prefix runs here,
-        // on this stack (wit/world.wit, `resource evaluation`).
-        let handle = Rc::new(eval::Evaluation::new(&js));
+        let (writer, send_reader) = wit_stream::new();
+        // The call starts the script: its synchronous prefix runs here, on
+        // this stack (wit/world.wit, `interface eval`).
+        let (recv, completion) = eval::eval(&js, send_reader);
+
         let state = Rc::new(RefCell::new(JoinState::default()));
         let owner_storage = UnsyncStorage::owner();
         let owner: OwnerSlot = Rc::new(RefCell::new(None));
 
         let boxed = owner_storage.insert(Box::new(Self {
-            handle: handle.clone(),
+            send: Rc::new(RefCell::new(Sender {
+                writer: Some(writer),
+                pending: Vec::new(),
+            })),
+            recv: Rc::new(RefCell::new(Some(recv))),
             state: state.clone(),
             owner: owner.clone(),
             next_recv: None,
@@ -109,7 +137,7 @@ impl WitEvaluator {
         *owner.borrow_mut() = Some(owner_storage);
 
         spawn_local(async move {
-            let result = match handle.join().await {
+            let result = match completion.await {
                 Ok(json) => serde_json::from_str(&json).map_err(EvalError::Serialization),
                 Err(e) => Err(eval_error(e)),
             };
@@ -121,8 +149,8 @@ impl WitEvaluator {
             match waker {
                 Some(waker) => waker.wake(),
                 // Nobody is awaiting and nobody ever polled: fire-and-forget.
-                // Release now rather than hold the host resource for the life
-                // of the instance.
+                // Release now rather than hold the evaluation's ends for the
+                // life of the instance.
                 None if unobserved => drop(owner.borrow_mut().take()),
                 None => {}
             }
@@ -156,11 +184,21 @@ impl Evaluator for WitEvaluator {
     fn poll_recv(&mut self, cx: &mut Context<'_>) -> Poll<Result<serde_json::Value, EvalError>> {
         self.state.borrow_mut().polled = true;
         if self.next_recv.is_none() {
-            let handle = self.handle.clone();
+            let slot = self.recv.clone();
             self.next_recv = Some(Box::pin(async move {
-                match handle.recv().await {
-                    Ok(json) => serde_json::from_str(&json).map_err(EvalError::Serialization),
-                    Err(e) => Err(eval_error(e)),
+                // Moved out for the await: a `RefCell` borrow must not be
+                // held across it, and only one of these futures exists at a
+                // time (this one is dropped the moment it resolves).
+                let Some(mut reader) = slot.borrow_mut().take() else {
+                    return Err(EvalError::Finished);
+                };
+                let next = reader.next().await;
+                *slot.borrow_mut() = Some(reader);
+                match next {
+                    Some(json) => serde_json::from_str(&json).map_err(EvalError::Serialization),
+                    // The stream closed: the script completed and will send
+                    // nothing further.
+                    None => Err(EvalError::Finished),
                 }
             }));
         }
@@ -174,7 +212,34 @@ impl Evaluator for WitEvaluator {
     fn send(&self, data: serde_json::Value) -> Result<(), EvalError> {
         // Values cross as JSON text both ways (wit/world.wit, `interface
         // eval`), so there is no serialization step left to fail.
-        self.handle.send(&data.to_string());
+        let sender = self.send.clone();
+        let writer = {
+            let mut s = sender.borrow_mut();
+            s.pending.push(data.to_string());
+            // `None` means a drain is already running (it will pick up what
+            // we just staged) or the read end is gone (nothing to do).
+            s.writer.take()
+        };
+        if let Some(mut w) = writer {
+            spawn_local(async move {
+                loop {
+                    let batch = std::mem::take(&mut sender.borrow_mut().pending);
+                    if batch.is_empty() {
+                        sender.borrow_mut().writer = Some(w);
+                        return;
+                    }
+                    // `write_all` loops internally over partial writes; a
+                    // non-empty remainder means the read end is gone, which
+                    // here means the script has finished. Drop the writer
+                    // (closing the stream) and discard: dioxus-web loses a
+                    // send to a closed channel just as quietly.
+                    if !w.write_all(batch).await.is_empty() {
+                        sender.borrow_mut().pending.clear();
+                        return;
+                    }
+                }
+            });
+        }
         Ok(())
     }
 }
@@ -184,6 +249,5 @@ fn eval_error(error: eval::Error) -> EvalError {
     match error {
         eval::Error::InvalidJs(message) => EvalError::InvalidJs(message),
         eval::Error::Communication(message) => EvalError::Communication(message),
-        eval::Error::Finished => EvalError::Finished,
     }
 }

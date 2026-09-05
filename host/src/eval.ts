@@ -5,189 +5,178 @@
 //
 // Governing docs: wit/world.wit `interface eval` (normative for behavior —
 // the async-function-body shape, the JSON both ways, `undefined` -> "null",
-// the constructor's synchronous-prefix bracket, the error cases), and
-// .deps/polyengine/contracts/embedder-api.md "Error model" (host import
-// with `result<T, E>` throws `ComponentException`, never a bare value) and
-// "Resources" (host-implemented resource = plain class; WIT constructor =
-// JS constructor). Cited inline as `contract:<section>`.
+// the synchronous-prefix bracket, the error cases, "the host MUST write the
+// future"), and .deps/polyengine/contracts/embedder-api.md:
+// - "Lowering accepts the natural JS producers" — `stream<T>` accepts a
+//   plain `AsyncIterable<T>` of elements; `future<T>` accepts a `Promise<T>`.
+//   A tuple lowers as a real JS array of those.
+// - "An import whose WIT result type is `future<T>` returns the future
+//   source" — a returned Promise is lowered AS the future, not awaited as
+//   the call's own completion. This import is `func` (sync), not `async`,
+//   so nothing here may return a Promise for the call itself; the promise
+//   for the completion result rides inside the returned tuple instead.
+// - "Value mapping": `result<T, E>` AS A VALUE (here, nested inside the
+//   future) is `{ kind: "ok", value } | { kind: "err", value }` — never a
+//   throw, never a rejected promise (a rejected future source is a
+//   host-failure-channel fault, not a guest-visible err).
+//
+// The redesign this file implements retired a subtask-based `Evaluation`
+// resource (polyengine#280): a subtask's settlement lands in the microtask
+// checkpoint after its export's initial activation returns, which a
+// `handle-event` handler awaiting an eval hit every call. Streams and
+// futures settle through a different runtime path unaffected by that gap,
+// so the `macrotask()` workaround the old resource-based version needed is
+// gone along with the resource.
 
-import { ComponentException } from "@deltic/protocol";
+import type { Stream } from "@deltic/protocol";
 import type { DispatchGate } from "./dispatch.ts";
 
 /** wit `eval.error` variant payload shapes (contract:"Value mapping",
- * `variant` row: `{ kind, value }`, `value` absent for payloadless cases). */
+ * `variant` row: `{ kind, value }`). */
 type EvalError =
   | { kind: "invalid-js"; value: string }
-  | { kind: "communication"; value: string }
-  | { kind: "finished" };
+  | { kind: "communication"; value: string };
 
-const FINISHED: EvalError = { kind: "finished" };
+/** wit `result<string, error>` as a VALUE (contract:"Value mapping") —
+ * never thrown, never a rejected promise. */
+type EvalResult = { kind: "ok"; value: string } | { kind: "err"; value: EvalError };
 
-/** Sentinel `recv()` result meaning "the script has completed and no more
- * values are coming" — used only to let `recv` race a queued value against
- * completion without leaking a permanently-parked waiter's identity. */
-const DONE = Symbol("eval-channel-done");
+/**
+ * A one-element-at-a-time outgoing channel, exposed only as `AsyncIterable`
+ * — one of the "natural JS producers" a `stream<T>` return accepts
+ * (contract cited above), so the runtime's own lowering does the pumping
+ * and this file needs no component-model stream handle at all for its
+ * OUTGOING direction. `push` satisfies the oldest parked reader or queues;
+ * `close` ends iteration for good.
+ */
+class OutChannel {
+  #queued: string[] = [];
+  #waiting: Array<(r: IteratorResult<string>) => void> = [];
+  #closed = false;
 
-// WORKAROUND for a polyengine runtime liveness gap (see
-// .deps/polyengine/runtime/src/exec/boundary.ts, "The settlement pump:
-// liveness between export calls"). `recv`/`join` are async host imports; if
-// the guest calls one from an export's INITIAL activation (its very first
-// callback, before any earlier park) and the returned promise settles in
-// the microtask checkpoint right after that activation returns
-// `task.return`, the export's driver has already exited (`EXIT-done`) with
-// no settlement pump armed to drive the store, and the guest's callback is
-// never resumed. Observed matrix: a script that settles synchronously, or
-// after `await null`, reproduces the hang; a script that settles after a
-// real macrotask (`setTimeout(r, 0)`) does not — by then the export call
-// has been outstanding across a macrotask boundary, so the pump is armed
-// and drives resumption when the promise settles. `use_future`'s eval calls
-// happen to dodge this (they start inside a later callback, past the
-// first stream-write park), but `handle-event`'s own initial activation
-// does not, so a `document::eval(...).join()` awaited straight from a
-// dioxus event handler hits it directly. Forcing every settlement here to
-// cross at least one real macrotask sidesteps the gap unconditionally, at
-// the cost of one macrotask of latency per `recv`/`join` resolution. This
-// comes out once polyengine's driver arms the pump for calls settling in
-// this window, tracked upstream — not a permanent fixture of this API.
-const macrotask = () => new Promise<void>((r) => setTimeout(r, 0));
-
-/** A single-type mailbox: `push` either satisfies the oldest pending
- * waiter or queues the value; `next` returns a queued value immediately or
- * parks a waiter. Never both queues non-empty at once. `finish` resolves
- * every currently-parked waiter (and all future `next()` calls, since
- * nothing more will ever be pushed) with `DONE`. */
-class Channel<T> {
-  #queued: T[] = [];
-  #waiting: Array<(v: T | typeof DONE) => void> = [];
-  #finished = false;
-
-  push(v: T): void {
+  push(v: string): void {
     const w = this.#waiting.shift();
-    if (w) w(v);
+    if (w) w({ value: v, done: false });
     else this.#queued.push(v);
   }
 
-  next(): Promise<T | typeof DONE> {
-    if (this.#queued.length > 0) return Promise.resolve(this.#queued.shift()!);
-    if (this.#finished) return Promise.resolve(DONE);
-    return new Promise((resolve) => this.#waiting.push(resolve));
+  close(): void {
+    this.#closed = true;
+    for (const w of this.#waiting.splice(0)) {
+      w({ value: undefined, done: true } as IteratorResult<string>);
+    }
   }
 
-  finish(): void {
-    this.#finished = true;
-    for (const w of this.#waiting.splice(0)) w(DONE);
+  [Symbol.asyncIterator](): AsyncIterator<string> {
+    return {
+      next: (): Promise<IteratorResult<string>> => {
+        if (this.#queued.length > 0) {
+          return Promise.resolve({ value: this.#queued.shift()!, done: false });
+        }
+        if (this.#closed) {
+          return Promise.resolve({ value: undefined, done: true } as IteratorResult<string>);
+        }
+        return new Promise((resolve) => this.#waiting.push(resolve));
+      },
+    };
   }
 }
 
+/** `JSON.stringify` returns `undefined` for values it can't represent as a
+ * top-level JSON text (a bare `undefined`/function/symbol), which the wit
+ * spells as "null" the same as an actual `undefined` return; anything
+ * `JSON.stringify` outright THROWS on (a `BigInt`, a cycle) is the wit's
+ * "a value could not be represented as JSON", handled by the caller. */
+function stringifyOrNull(v: unknown): string {
+  return JSON.stringify(v) ?? "null";
+}
+
 /**
- * Build the host side of `polymorph:dioxus/eval` — a single `Evaluation`
- * resource class closing over the dispatch gate.
+ * Build the host side of `polymorph:dioxus/eval` — a single sync `eval`
+ * function closing over the dispatch gate.
  *
- * Split out as a factory (matching `createDomImports`, host.ts) so
- * `Evaluation` can be unit-tested against a bare `DispatchGate`, with no
- * component in the loop (host/tests/eval_test.ts).
+ * Split out as a factory (matching `createDomImports`, host.ts) so `eval`
+ * can be unit-tested against a bare `DispatchGate`, with no component in
+ * the loop (host/tests/eval_test.ts).
  */
 export function createEvalImports(gate: DispatchGate) {
-  class Evaluation {
-    /** Values the script sends via `dioxus.send`, waiting for the guest's
-     * `recv`. Finished once the script's promise settles: nothing more
-     * will ever be pushed. */
-    #jsToRust = new Channel<string>();
-    /** Values the guest sends via `Evaluation.send`, waiting for the
-     * script's `await dioxus.recv()`. */
-    #rustToJs = new Channel<unknown>();
-    /** Settled once the script's promise settles — never a live rejected
-     * promise, so nothing here becomes an unhandled rejection. */
-    #outcome: Promise<{ ok: string } | { err: EvalError }>;
-    /** `join` a second time reports `finished` (wit doc: one of the two
-     * ways to reach it); flips once the first `join` observes `#outcome`. */
-    #joined = false;
+  function evaluate(
+    js: string,
+    send: Stream<string>,
+  ): [AsyncIterable<string>, Promise<EvalResult>] {
+    const out = new OutChannel();
 
-    constructor(js: string) {
-      let body: (dioxus: unknown) => Promise<unknown>;
-      let ctorError: EvalError | undefined;
-      try {
-        // wit: "the script is the BODY of an async function taking one
-        // parameter, `dioxus`" (dioxus-desktop's own shape, src/query.rs).
-        const AsyncFunction = async function () {}.constructor as new (
-          ...args: string[]
-        ) => (dioxus: unknown) => Promise<unknown>;
-        body = new AsyncFunction("dioxus", js);
-      } catch (e) {
-        // A SyntaxError constructing the function. wit: "a constructor
-        // cannot fail" — remembered as the join outcome, not thrown here
-        // (a throw from a host resource constructor is a trap, and the
-        // WIT constructor has no result type).
-        ctorError = { kind: "invalid-js", value: String(e) };
-        body = () => Promise.resolve(undefined);
-      }
-
-      const dioxusObj = {
-        send: (v: unknown) => this.#jsToRust.push(JSON.stringify(v) ?? "null"),
-        recv: async () => {
-          const v = await this.#rustToJs.next();
-          return v === DONE ? undefined : v;
-        },
-        // dioxus-web's PROMISE_WRAPPER calls `dioxus.close()` itself, but
-        // only from ITS wrapper script, never from user code — this host
-        // runs the app's script body directly (no such wrapper), so
-        // `close` has no caller and is omitted.
-      };
-
-      if (ctorError) {
-        this.#outcome = Promise.resolve({ err: ctorError });
-        this.#jsToRust.finish();
-      } else {
-        // wit: "the synchronous prefix ... runs INSIDE the constructor, on
-        // the calling guest's stack — so it is bracketed by the host's
-        // dispatch gate like `dom.set-focus` is" (dispatch.ts window 3):
-        // this call synchronously runs everything up to the script's
-        // first `await`, and that prefix can mutate the DOM / fire
-        // delegated events.
-        gate.beginApply();
-        let p: Promise<unknown>;
-        try {
-          p = body(dioxusObj);
-        } finally {
-          gate.endApply();
-        }
-        // `JSON.stringify` itself can throw (a BigInt, a cycle): that is the
-        // wit's "a value could not be represented as JSON", so it lands in
-        // the same `communication` arm as a throwing script rather than
-        // rejecting `#outcome` with an unbranded error (which the runtime
-        // would turn into a trap — contract:"Error model").
-        this.#outcome = p.then((v) => JSON.stringify(v) ?? "null").then(
-          (ok) => ({ ok }),
-          (e) => ({
-            err: { kind: "communication", value: "Error running JS: " + e } as EvalError,
-          }),
-        );
-        // Whichever way it settles, nothing more will ever cross via
-        // `dioxus.send` — unblock any `recv` still parked.
-        this.#outcome.then(() => this.#jsToRust.finish());
-      }
+    let body: (dioxus: unknown) => Promise<unknown>;
+    try {
+      // wit: "the script is the BODY of an async function taking one
+      // parameter, `dioxus`" (dioxus-desktop's own shape, src/query.rs).
+      const AsyncFunction = async function () {}.constructor as new (
+        ...args: string[]
+      ) => (dioxus: unknown) => Promise<unknown>;
+      body = new AsyncFunction("dioxus", js);
+    } catch (e) {
+      // A SyntaxError constructing the function. wit: the future resolves
+      // `err invalid-js` immediately; the returned stream is empty/closed
+      // and nothing runs.
+      out.close();
+      return [out, Promise.resolve({ kind: "err", value: { kind: "invalid-js", value: String(e) } })];
     }
 
-    send(json: string): void {
-      this.#rustToJs.push(JSON.parse(json));
+    const dioxusObj = {
+      send: (v: unknown) => out.push(stringifyOrNull(v)),
+      recv: async () => {
+        const chunk = await send.read(1);
+        if (chunk.length === 0) return undefined; // guest's writer dropped
+        return JSON.parse(chunk[0]);
+      },
+      // dioxus-web's PROMISE_WRAPPER calls `dioxus.close()` itself, but
+      // only from ITS wrapper script, never from user code — this host
+      // runs the app's script body directly (no such wrapper), so `close`
+      // has no caller and is omitted.
+    };
+
+    // wit: "the synchronous prefix ... runs INSIDE this call, on the
+    // calling guest's stack — so it is bracketed by the host's dispatch
+    // gate like `dom.set-focus` is" (dispatch.ts window 3): this call
+    // synchronously runs everything up to the script's first `await`, and
+    // that prefix can mutate the DOM / fire delegated events.
+    gate.beginApply();
+    let p: Promise<unknown>;
+    try {
+      p = body(dioxusObj);
+    } finally {
+      gate.endApply();
     }
 
-    async recv(): Promise<string> {
-      const v = await this.#jsToRust.next();
-      await macrotask();
-      if (v === DONE) throw new ComponentException(FINISHED);
-      return v;
-    }
+    // The host MUST write the future (wit doc), even for a script that
+    // never completes before the mount tears down — but this promise
+    // always eventually settles as long as the script's own promise does
+    // (or the process ends first); a script that truly never returns is a
+    // hung promise the host cannot do better than.
+    //
+    // `JSON.stringify` itself can throw (a BigInt, a cycle): the wit's "a
+    // value could not be represented as JSON" lands in the same
+    // `communication` arm as a throwing script — never a rejected future
+    // source, which the contract treats as a host fault.
+    //
+    // The stream is closed BEFORE the future resolves so the guest can
+    // never observe the completion while a value it was sent is still in
+    // flight: everything `dioxus.send` pushed is already queued in `out`
+    // by the time the script's promise settles, so closing here orders
+    // "last value, then end-of-stream, then completion" for the reader.
+    const outcome: Promise<EvalResult> = p.then((v) => stringifyOrNull(v)).then(
+      (value): EvalResult => {
+        out.close();
+        return { kind: "ok", value };
+      },
+      (e): EvalResult => {
+        out.close();
+        return { kind: "err", value: { kind: "communication", value: "Error running JS: " + e } };
+      },
+    );
 
-    async join(): Promise<string> {
-      if (this.#joined) throw new ComponentException(FINISHED);
-      this.#joined = true;
-      const r = await this.#outcome;
-      await macrotask();
-      if ("err" in r) throw new ComponentException(r.err);
-      return r.ok;
-    }
+    return [out, outcome];
   }
 
-  return { Evaluation };
+  return { eval: evaluate };
 }
