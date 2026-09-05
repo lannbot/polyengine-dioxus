@@ -67,14 +67,14 @@ fixtures:
     cp target/wasm32-wasip2/release/surface_probe.wasm \
       fixtures/build/surface-probe.component.wasm
     wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe.component.wasm
-    cargo build -p eval-probe --target wasm32-wasip2 --release
-    cp target/wasm32-wasip2/release/eval_probe.wasm \
-      fixtures/build/eval-probe.component.wasm
-    wasm-tools validate --features component-model,cm-async fixtures/build/eval-probe.component.wasm
+    cargo build -p platform-probe --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/platform_probe.wasm \
+      fixtures/build/platform-probe.component.wasm
+    wasm-tools validate --features component-model,cm-async fixtures/build/platform-probe.component.wasm
     # Built with the renderer's `eval` feature, so the import must be there:
     # the host tests mount it with `MountOptions.eval` (wit/world.wit, the
     # `eval` interface doc).
-    if ! wasm-tools component wit fixtures/build/eval-probe.component.wasm | grep -q 'polymorph:dioxus/eval@'; then echo "eval-probe does not import polymorph:dioxus/eval" >&2; exit 1; fi
+    if ! wasm-tools component wit fixtures/build/platform-probe.component.wasm | grep -q 'polymorph:dioxus/eval@'; then echo "platform-probe does not import polymorph:dioxus/eval" >&2; exit 1; fi
 
 # Build an example app component into examples/build/.
 #

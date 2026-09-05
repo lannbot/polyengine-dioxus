@@ -10,4 +10,14 @@ export { EventDispatcher, serializePayload } from "./events.ts";
 export type { DispatchSink, NativeEventLike } from "./events.ts";
 
 export { mountApp } from "./host.ts";
-export type { Mounted, MountOptions } from "./host.ts";
+export type { DomImports, EvalImports, HeadImports, HistoryImports, Mounted, MountOptions } from "./host.ts";
+
+export { createEvalImports, evalDenied } from "./eval.ts";
+
+export { createHeadImports } from "./head.ts";
+
+export { createHistoryImports, fragmentHistory, memoryHistory } from "./history.ts";
+export type { HistoryProvider } from "./history.ts";
+
+export type { Interceptor, Interceptors } from "./intercept.ts";
+export { wrap } from "./intercept.ts";

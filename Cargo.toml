@@ -26,10 +26,13 @@ dioxus-html = { version = "=0.7.10", default-features = false }
 # already in the tree via dioxus-core, so naming it costs nothing; used for
 # hot-path interning maps.
 rustc-hash = "2"
-# `eval` only; see src/document.rs and the `eval` interface doc in
-# wit/world.wit. Optional so that a renderer built without the feature names
-# nothing from the interface and so emits no import for it.
-dioxus-document = { version = "=0.7.10", optional = true }
+# The `Document` provider is unconditional: it backs the world's `head`
+# interface (`Title`/`Meta`/`Style`/`Script`/`Link`), which is not opt-in.
+# Only its `eval` method is feature-gated (see src/document.rs).
+dioxus-document = "=0.7.10"
+# The `History` provider behind the world's `history` interface, which
+# dioxus-router drives. Already in the tree via dioxus (feature `document`).
+dioxus-history = "=0.7.10"
 serde_json = { version = "1", optional = true }
 # `Owner`/`UnsyncStorage`: dioxus-document's `Eval::new` takes a
 # `GenerationalBox` but re-exports neither, and dioxus-core exposes the crate
@@ -40,7 +43,7 @@ generational-box = { version = "=0.7.10", optional = true }
 # Opt in to `document::eval`. OFF by default: a component built with it
 # imports `polymorph:dioxus/eval` and will not instantiate against a host
 # that did not also opt in (`MountOptions.eval`).
-eval = ["dep:dioxus-document", "dep:serde_json", "dep:generational-box"]
+eval = ["dep:serde_json", "dep:generational-box"]
 
 [dev-dependencies]
 # Native-only: `rsx!` for driving a real VirtualDom through the writer in unit
@@ -56,7 +59,7 @@ dioxus = { version = "=0.7.10", default-features = false, features = [
 dioxus-ssr = "=0.7.9"
 
 [workspace]
-members = [".", "ssr", "fixtures/surface-probe", "fixtures/eval-probe", "examples/counter", "examples/bench-rows", "examples/todomvc", "examples/components", "examples/primitives"]
+members = [".", "ssr", "fixtures/surface-probe", "fixtures/platform-probe", "examples/counter", "examples/bench-rows", "examples/todomvc", "examples/components", "examples/primitives"]
 
 # `dioxus-sdk-time` waits by calling the browser's `setTimeout` through
 # wasm-bindgen, which on wasm32-wasip2 compiles to off-target stubs that abort
