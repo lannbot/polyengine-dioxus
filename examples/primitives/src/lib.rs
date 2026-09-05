@@ -14,22 +14,24 @@
 //!
 //! # Compatibility matrix
 //!
-//! This renderer has no JS boundary: `document::eval` resolves to dioxus's
-//! `NoOpDocument`, which answers every eval with `EvalError::Unsupported`
-//! (dioxus-document-0.7.10 src/document.rs:121-145). That is a *graceful*
-//! failure — nothing traps — so eval-dependent primitives still render and
-//! still work for everything driven from Rust; they lose only the parts
-//! implemented in JavaScript. They are included here with the loss named.
+//! `document::eval` works only when BOTH sides opt in: the renderer must be
+//! built with its `eval` feature and the host must grant the import
+//! (`MountOptions.eval`) — see the `eval` interface doc in `wit/world.wit`.
+//! This gallery is built without the feature, so here `document::eval`
+//! resolves to dioxus's `NoOpDocument`, which answers every eval with
+//! `EvalError::Unsupported` (dioxus-document-0.7.10 src/document.rs:121-145).
+//! That is a *graceful* failure — nothing traps — so eval-dependent
+//! primitives still render and still work for everything driven from Rust;
+//! they lose only the parts implemented in JavaScript. They are included
+//! here with the loss named.
 //!
-//! **This is permanent, not a gap awaiting work.** Implementing `eval` is
-//! technically possible — the host is JavaScript, and dioxus-desktop does
-//! exactly this over IPC — but a primary consumer of this renderer
-//! (polyvisor) cannot permit arbitrary JS evaluation at all, so the
-//! capability will not be added. Anything below marked degraded is degraded
-//! for good on this renderer. The remedy for a behaviour you actually need
-//! is to reimplement it with Dioxus event handlers plus CSS, as
-//! `examples/components/src/jsfree.rs` does for a dialog and a tooltip —
-//! not to wait for eval.
+//! **Assume the degradations below apply to your app too.** They hold for
+//! this gallery, and for any app running under polyvisor, which never grants
+//! eval to an app: a browser cannot sandbox arbitrary JS well enough for a
+//! host that runs untrusted components. The remedy for a behaviour you
+//! actually need is to reimplement it with Dioxus event handlers plus CSS,
+//! as `examples/components/src/jsfree.rs` does for a dialog and a tooltip —
+//! not to turn the feature on.
 //!
 //! ## Included and fully functional
 //!

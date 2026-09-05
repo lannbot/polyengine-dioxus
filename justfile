@@ -45,6 +45,9 @@ check:
     # expansion. Checking the example covers both.
     cargo clippy -p counter-example --no-default-features --features ssr \
       --target wasm32-wasip2 -- -D warnings
+    # Explicit: whether the workspace pass above unifies the `eval` feature
+    # onto the renderer depends on which crates are in the graph.
+    cargo clippy -p polyengine-dioxus --features eval --target wasm32-wasip2 -- -D warnings
     deno task check
 
 test:
@@ -54,8 +57,8 @@ test:
     cargo test -p polyengine-dioxus-ssr
     deno task test
 
-# Build the surface-probe fixture component into fixtures/build/. The
-# full-stack host tests load it. wasm32-wasip2 emits a component directly.
+# Build the fixture components into fixtures/build/. The full-stack host
+# tests load them. wasm32-wasip2 emits a component directly.
 fixtures:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -64,6 +67,14 @@ fixtures:
     cp target/wasm32-wasip2/release/surface_probe.wasm \
       fixtures/build/surface-probe.component.wasm
     wasm-tools validate --features component-model,cm-async fixtures/build/surface-probe.component.wasm
+    cargo build -p eval-probe --target wasm32-wasip2 --release
+    cp target/wasm32-wasip2/release/eval_probe.wasm \
+      fixtures/build/eval-probe.component.wasm
+    wasm-tools validate --features component-model,cm-async fixtures/build/eval-probe.component.wasm
+    # Built with the renderer's `eval` feature, so the import must be there:
+    # the host tests mount it with `MountOptions.eval` (wit/world.wit, the
+    # `eval` interface doc).
+    if ! wasm-tools component wit fixtures/build/eval-probe.component.wasm | grep -q 'polymorph:dioxus/eval@'; then echo "eval-probe does not import polymorph:dioxus/eval" >&2; exit 1; fi
 
 # Build an example app component into examples/build/.
 #
@@ -82,6 +93,9 @@ example name:
     component="target/wasm32-wasip2/release/$(echo {{name}} | tr - _)_example.wasm"
     cp "$component" examples/build/{{name}}.component.wasm
     wasm-tools validate --features component-model,cm-async examples/build/{{name}}.component.wasm
+    # Built without the renderer's `eval` feature, so the import must be
+    # absent (wit/world.wit, the `eval` interface doc: opt-in on both sides).
+    if wasm-tools component wit examples/build/{{name}}.component.wasm | grep -q 'polymorph:dioxus/eval@'; then echo "{{name}} imports polymorph:dioxus/eval without the eval feature" >&2; exit 1; fi
     # Build-time translation (embedder-api.md amendment A4): the translation
     # ENVELOPE is the blessed deploy artifact, so the deployed site ships
     # component.wasm + envelope + runtime and NO translator.
