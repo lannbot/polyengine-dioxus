@@ -258,6 +258,13 @@ pub async fn run(root: fn() -> Element, mode: RenderMode) -> MutationStream {
     dioxus_html::set_event_converter(Box::new(WitEventConverter));
 
     let dom = VirtualDom::new(root);
+    // dioxus-document's `document()` resolves `Rc<dyn Document>` out of the
+    // root scope's context (dioxus-document-0.7.10 src/lib.rs:14); without
+    // this it falls back to `NoOpDocument`.
+    #[cfg(feature = "eval")]
+    dom.provide_root_context(
+        Rc::new(crate::document::WitDocument) as Rc<dyn dioxus_document::Document>
+    );
     let interner = Rc::new(RefCell::new(Interner::new()));
     RUNTIME.set(Some(dom.runtime()));
     INTERNER.set(Some(interner.clone()));

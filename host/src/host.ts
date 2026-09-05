@@ -13,6 +13,7 @@ import type { Stream } from "@deltic/protocol";
 
 import { DomApplier } from "./applier.ts";
 import { DispatchGate } from "./dispatch.ts";
+import { createEvalImports } from "./eval.ts";
 import { EventDispatcher, serializePayload } from "./events.ts";
 import type { NativeEventLike } from "./events.ts";
 import { applyOperations } from "./operations.ts";
@@ -44,6 +45,17 @@ export interface MountOptions {
    * routed here: `await exports.run(mode)` rejects and `mountApp` throws it to
    * the caller. */
   onError?: (err: unknown) => void;
+  /** Supply `polymorph:dioxus/eval@0.6.0` (wit/world.wit `interface eval`)
+   * so guest `document::eval` calls run arbitrary JS in this page.
+   * Defaults to `false`. OPT-IN ON BOTH SIDES (the interface doc is
+   * normative): a component whose renderer was built without the `eval`
+   * Cargo feature never imports the interface at all, so this flag is
+   * moot for it either way; a component that DOES import it fails to
+   * instantiate against a host that leaves this `false` — failure is the
+   * safe direction. polyvisor sets this only for its own visor, never for
+   * an untrusted app: a browser cannot sandbox arbitrary JS, so this is a
+   * trusted-computing-base decision, not a per-mount convenience. */
+  eval?: boolean;
 }
 
 export interface Mounted {
@@ -400,6 +412,13 @@ export async function mountApp(opts: MountOptions): Promise<Mounted> {
     // bindgen-emitted lowerCamel names.
     "polymorph:dioxus/events@0.6.0": { DomEvent },
     "polymorph:dioxus/dom@0.6.0": createDomImports(applier, gate),
+    // Present only when the caller opted in (`MountOptions.eval` doc
+    // above). Absent otherwise — the world's `import eval` still exists
+    // in every `app`-world component, but wit-component only encodes the
+    // interfaces the guest's core module actually imports, so a
+    // non-`eval`-feature build never asks for this key and its absence
+    // here is never noticed.
+    ...(opts.eval ? { "polymorph:dioxus/eval@0.6.0": createEvalImports(gate) } : {}),
   };
 
   const instance = await instantiate(opts.source, imports);

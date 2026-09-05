@@ -16,12 +16,18 @@
 //!   it.
 //!
 //! An application crate wires itself up with [`launch!`].
+//!
+//! Under the optional `eval` feature, `document` (wasm32 only) adds the
+//! `Document` provider backing `document::eval` over the world's opt-in
+//! `eval` interface.
 
 pub mod hydrate;
 pub mod interner;
 
 #[cfg(target_arch = "wasm32")]
 pub mod bindings;
+#[cfg(all(target_arch = "wasm32", feature = "eval"))]
+pub mod document;
 #[cfg(target_arch = "wasm32")]
 pub mod driver;
 #[cfg(target_arch = "wasm32")]
